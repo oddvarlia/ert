@@ -58,6 +58,9 @@ class _Event:
 
 
 class _InteractionDefinition:
+    def __repr__(self) -> str:
+        return str(self.__dict__)
+
     def __init__(self, provider_states: Optional[List[Dict[str, Any]]]) -> None:
         self.provider_states: Optional[List[Dict[str, Any]]] = provider_states
         self.scenario: str = ""
@@ -78,6 +81,9 @@ class _Narrative:
         self.provider = provider
         self._interactions: List[_InteractionDefinition] = []
         self.uri: str = ""
+
+    def __repr__(self) -> str:
+        return str(self.__dict__)
 
     def given(self, provider_state: Optional[str], **params) -> "_Narrative":
         state = None
@@ -124,6 +130,9 @@ class _Narrative:
 
     async def __aenter__(self):
         async def _handler(websocket, path):
+            if path != self._path:
+                print(f"not handling {path} as it is not {self._path}")
+                return
             for interaction in reversed(self._interactions):
                 if type(interaction) == _InteractionDefinition:
                     raise TypeError(
@@ -144,9 +153,15 @@ class _Narrative:
                     )
 
         proto, hostname, port = self.uri.split(":")
+        path = ""
+        if "/" in port:
+            port, path = port.split("/")
         if proto == "wss":
             raise ValueError("cannot mock secure socket")
         hostname = hostname[2:]
+        self.path = path
+        self.port = int(port)
+        self.hostname = hostname
         self._ws = await websockets.serve(_handler, hostname, int(port))
 
     async def __aexit__(self, *args):
@@ -157,6 +172,9 @@ class _Narrative:
 class _Actor:
     def __init__(self, name: str) -> None:
         self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
 
 
 class Provider(_Actor):

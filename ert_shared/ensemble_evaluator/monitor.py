@@ -107,8 +107,9 @@ class _Monitor:
             logger.debug(f"monitor-{self._id} receive cancelled")
         self._loop.run_until_complete(done_future)
 
-    def track(self):
-        wait_for_ws(self._base_uri)
+    def track(self, conn_check=True):
+        if conn_check:
+            wait_for_ws(self._base_uri)
 
         done_future = asyncio.Future(loop=self._loop)
 
