@@ -1,5 +1,13 @@
+import asyncio
+from asyncio.events import AbstractEventLoop
 from typing import Any, Dict, List, Optional
 import uuid
+import threading
+import functools
+from ert_shared.ensemble_evaluator.ws_util import wait
+from websockets.server import WebSocketServer
+
+from fnmatch import fnmatchcase
 
 try:
     from typing import TypedDict  # >=3.8
@@ -34,7 +42,12 @@ class _Event:
     def assert_matches(self, other: CloudEvent):
         msg = f"{self} did not match {other}"
         if self.source:
-            assert self.source == other["source"], msg
+            if "*" in self.source:
+                assert fnmatchcase(other["source"], self.source), msg
+            elif "*" in other["source"]:
+                assert fnmatchcase(self.source, other["source"]), msg
+            else:
+                assert self.source == other["source"], msg
         if self.type_:
             assert self.type_ == other["type"], msg
         if self.subject:
@@ -76,11 +89,24 @@ class _ResponseDefinition(_InteractionDefinition):
 
 
 class _Narrative:
-    def __init__(self, consumer: "Consumer", provider: "Provider") -> None:
+    def __init__(self, consumer: "Consumer", provider: "Provider", uri: str) -> None:
         self.consumer = consumer
         self.provider = provider
         self._interactions: List[_InteractionDefinition] = []
-        self.uri: str = ""
+        self._loop: Optional[AbstractEventLoop] = None
+        self._ws: Optional[WebSocketServer] = None
+        self._uri = uri
+        proto, hostname, port = self._uri.split(":")
+        path = ""
+        if "/" in port:
+            port, path = port.split("/")
+        if proto == "wss":
+            raise ValueError("cannot mock secure socket")
+        hostname = hostname[2:]
+        self._base_uri = f"{proto}://{hostname}:{port}"
+        self.path = "/" + path
+        self.port = int(port)
+        self.hostname = hostname
 
     def __repr__(self) -> str:
         return str(self.__dict__)
@@ -128,41 +154,58 @@ class _Narrative:
         self._interactions[0].events = cloudevents
         return self
 
-    async def __aenter__(self):
-        async def _handler(websocket, path):
-            if path != self._path:
-                print(f"not handling {path} as it is not {self._path}")
-                return
-            for interaction in reversed(self._interactions):
-                if type(interaction) == _InteractionDefinition:
-                    raise TypeError(
-                        "the first interaction needs to be promoted to either response or receive"
-                    )
-                elif isinstance(interaction, _ReceiveDefinition):
-                    for event in interaction.events:
-                        received_event = await websocket.recv()
-                        event.assert_matches(from_json(received_event))
-                    print("OK", interaction.scenario)
-                elif isinstance(interaction, _ResponseDefinition):
-                    for event in interaction.events:
-                        await websocket.send(to_json(event.to_cloudevent()))
-                    print("OK", interaction.scenario)
-                else:
-                    raise TypeError(
-                        f"expected either receive or response, got {interaction}"
-                    )
+    async def _ws_handler(self, websocket, path):
+        if path != self.path:
+            print(f"not handling {path} as it is not the desired path {self.path}")
+            return
+        for interaction in reversed(self._interactions):
+            if type(interaction) == _InteractionDefinition:
+                raise TypeError(
+                    "the first interaction needs to be promoted to either response or receive"
+                )
+            elif isinstance(interaction, _ReceiveDefinition):
+                for event in interaction.events:
+                    received_event = await websocket.recv()
+                    event.assert_matches(from_json(received_event))
+                print("OK", interaction.scenario)
+            elif isinstance(interaction, _ResponseDefinition):
+                for event in interaction.events:
+                    await websocket.send(to_json(event.to_cloudevent()))
+                print("OK", interaction.scenario)
+            else:
+                raise TypeError(
+                    f"expected either receive or response, got {interaction}"
+                )
 
-        proto, hostname, port = self.uri.split(":")
-        path = ""
-        if "/" in port:
-            port, path = port.split("/")
-        if proto == "wss":
-            raise ValueError("cannot mock secure socket")
-        hostname = hostname[2:]
-        self.path = path
-        self.port = int(port)
-        self.hostname = hostname
-        self._ws = await websockets.serve(_handler, hostname, int(port))
+    def _sync_ws(self, delay_startup=0):
+        self._loop = asyncio.new_event_loop()
+        self._done = self._loop.create_future()
+
+        async def _serve():
+            await asyncio.sleep(delay_startup)
+            ws = await websockets.serve(self._ws_handler, self.hostname, self.port)
+            await self._done
+            ws.close()
+            await ws.wait_closed()
+
+        self._loop.run_until_complete(_serve())
+        self._loop.close()
+
+    def __enter__(self):
+        self._ws_thread = threading.Thread(target=self._sync_ws)
+        self._ws_thread.start()
+        if asyncio.get_event_loop().is_running():
+            raise RuntimeError(
+                "sync narrative should control the loop, maybe you called it from within an async test?"
+            )
+        asyncio.get_event_loop().run_until_complete(wait(self._base_uri, 2))
+
+    def __exit__(self, *args, **kwargs):
+        self._loop.call_soon_threadsafe(self._done.set_result, None)
+        self._ws_thread.join()
+
+    async def __aenter__(self):
+        self._ws = await websockets.serve(self._ws_handler, self.hostname, self.port)
 
     async def __aexit__(self, *args):
         self._ws.close()
@@ -182,5 +225,5 @@ class Provider(_Actor):
 
 
 class Consumer(_Actor):
-    def forms_narrative_with(self, provider: Provider) -> _Narrative:
-        return _Narrative(self, provider)
+    def forms_narrative_with(self, provider: Provider, uri, **kwargs) -> _Narrative:
+        return _Narrative(self, provider, uri, **kwargs)
