@@ -50,9 +50,16 @@ def test_consume(unused_tcp_port, caplog):
         )
     )
 
+    expected_events_types = iter(
+        [
+            ids.EVTYPE_EE_SNAPSHOT,
+            ids.EVTYPE_EE_SNAPSHOT_UPDATE,
+            ids.EVTYPE_EE_TERMINATED,
+        ]
+    )
     with narrative:
         with _Monitor(narrative.hostname, narrative.port) as monitor:
             for event in monitor.track():
+                assert event["type"] == next(expected_events_types)
                 if event.data and event.data.get(ids.STATUS) == ENSEMBLE_STATE_STOPPED:
                     monitor.signal_done()
-        # narrative.verify()

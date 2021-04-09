@@ -1,5 +1,6 @@
 import asyncio
 from asyncio.events import AbstractEventLoop
+from asyncio.queues import QueueEmpty
 from typing import Any, Dict, List, Optional
 import uuid
 import threading
@@ -107,9 +108,13 @@ class _Narrative:
         self.path = "/" + path
         self.port = int(port)
         self.hostname = hostname
+        self._errors = None
 
     def __repr__(self) -> str:
         return str(self.__dict__)
+
+    def _reset(self):
+        self._errors = asyncio.Queue()
 
     def given(self, provider_state: Optional[str], **params) -> "_Narrative":
         state = None
@@ -160,22 +165,28 @@ class _Narrative:
             return
         for interaction in reversed(self._interactions):
             if type(interaction) == _InteractionDefinition:
-                raise TypeError(
+                e = TypeError(
                     "the first interaction needs to be promoted to either response or receive"
                 )
+                self._errors.put_nowait(e)
+                # raise e
             elif isinstance(interaction, _ReceiveDefinition):
                 for event in interaction.events:
                     received_event = await websocket.recv()
-                    event.assert_matches(from_json(received_event))
+                    try:
+                        event.assert_matches(from_json(received_event))
+                    except AssertionError as e:
+                        self._errors.put_nowait(e)
+                        # raise
                 print("OK", interaction.scenario)
             elif isinstance(interaction, _ResponseDefinition):
                 for event in interaction.events:
                     await websocket.send(to_json(event.to_cloudevent()))
                 print("OK", interaction.scenario)
             else:
-                raise TypeError(
-                    f"expected either receive or response, got {interaction}"
-                )
+                e = TypeError(f"expected either receive or response, got {interaction}")
+                self._errors.put_nowait(e)
+                # raise e
 
     def _sync_ws(self, delay_startup=0):
         self._loop = asyncio.new_event_loop()
@@ -192,6 +203,7 @@ class _Narrative:
         self._loop.close()
 
     def __enter__(self):
+        self._reset()
         self._ws_thread = threading.Thread(target=self._sync_ws)
         self._ws_thread.start()
         if asyncio.get_event_loop().is_running():
@@ -203,13 +215,29 @@ class _Narrative:
     def __exit__(self, *args, **kwargs):
         self._loop.call_soon_threadsafe(self._done.set_result, None)
         self._ws_thread.join()
+        errors = asyncio.get_event_loop().run_until_complete(self._verify())
+        if errors:
+            raise AssertionError(errors)
+
+    async def _verify(self):
+        errors = []
+        while True:
+            try:
+                errors.append(self._errors.get_nowait())
+            except QueueEmpty:
+                break
+        return errors
 
     async def __aenter__(self):
+        self._reset()
         self._ws = await websockets.serve(self._ws_handler, self.hostname, self.port)
 
     async def __aexit__(self, *args):
         self._ws.close()
         await self._ws.wait_closed()
+        errors = await self._verify()
+        if errors:
+            raise AssertionError(errors)
 
 
 class _Actor:
