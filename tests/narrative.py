@@ -19,6 +19,15 @@ import websockets
 from cloudevents.http import CloudEvent, to_json, from_json
 
 
+class _ConnectionInformation(TypedDict):  # type: ignore
+    uri: str
+    proto: str
+    hostname: str
+    port: int
+    path: str
+    base_uri: str
+
+
 class EventDescription(TypedDict):  # type: ignore
     id_: str
     source: str
@@ -29,9 +38,6 @@ class EventDescription(TypedDict):  # type: ignore
 
 
 class _Event:
-    def __repr__(self) -> str:
-        return str(self.__dict__)
-
     def __init__(self, description: EventDescription) -> None:
         self._id = description.get("id_", uuid.uuid4())
         self.source = description["source"]
@@ -72,9 +78,6 @@ class _Event:
 
 
 class _InteractionDefinition:
-    def __repr__(self) -> str:
-        return str(self.__dict__)
-
     def __init__(self, provider_states: Optional[List[Dict[str, Any]]]) -> None:
         self.provider_states: Optional[List[Dict[str, Any]]] = provider_states
         self.scenario: str = ""
@@ -89,79 +92,25 @@ class _ResponseDefinition(_InteractionDefinition):
     pass
 
 
-class _Narrative:
-    def __init__(self, consumer: "Consumer", provider: "Provider", uri: str) -> None:
-        self.consumer = consumer
-        self.provider = provider
-        self._interactions: List[_InteractionDefinition] = []
+class _NarrativeMock:
+    def __init__(
+        self,
+        interactions: List[_InteractionDefinition],
+        conn_info: _ConnectionInformation,
+    ) -> None:
+        self._interactions: List[_InteractionDefinition] = interactions
         self._loop: Optional[AbstractEventLoop] = None
         self._ws: Optional[WebSocketServer] = None
-        self.uri = uri
-        proto, hostname, port = self.uri.split(":")
-        path = ""
-        if "/" in port:
-            port, path = port.split("/")
-        if proto == "wss":
-            raise ValueError("cannot mock secure socket")
-        hostname = hostname[2:]
-        self._base_uri = f"{proto}://{hostname}:{port}"
-        self.path = "/" + path
-        self.port = int(port)
-        self.hostname = hostname
+        self.uri: str = conn_info["uri"]
+        self._conn_info = conn_info
 
         # A queue on which errors will be put
-        self._errors = None
-
-    def __repr__(self) -> str:
-        return str(self.__dict__)
-
-    def _reset(self):
-        self._errors = asyncio.Queue()
-
-    def given(self, provider_state: Optional[str], **params) -> "_Narrative":
-        state = None
-        if provider_state:
-            state = [{"name": provider_state, "params": params}]
-        self._interactions.insert(0, _InteractionDefinition(state))
-        return self
-
-    def and_given(self, provider_state: str, **params) -> "_Narrative":
-        raise NotImplementedError("not yet implemented")
-
-    def receives(self, scenario: str) -> "_Narrative":
-        def_ = self._interactions[-1]
-        if type(def_) == _InteractionDefinition:
-            def_.__class__ = _ReceiveDefinition
-        elif isinstance(def_, _ResponseDefinition) and not def_.events:
-            raise ValueError("receive followed an empty response scenario")
-        else:
-            def_ = _ReceiveDefinition(self._interactions[-1].provider_states)
-            self._interactions.insert(0, def_)
-        def_.scenario = scenario
-        return self
-
-    def responds_with(self, scenario: str) -> "_Narrative":
-        def_ = self._interactions[-1]
-        if type(def_) == _InteractionDefinition:
-            def_.__class__ = _ResponseDefinition
-        elif isinstance(def_, _ReceiveDefinition) and not def_.events:
-            raise ValueError("response followed an empty receive scenario")
-        else:
-            def_ = _ResponseDefinition(self._interactions[-1].provider_states)
-            self._interactions.insert(0, def_)
-        def_.scenario = scenario
-        return self
-
-    def cloudevents_in_order(self, events: List[EventDescription]) -> "_Narrative":
-        cloudevents = []
-        for event in events:
-            cloudevents.append(_Event(event))
-        self._interactions[0].events = cloudevents
-        return self
+        self._errors: asyncio.Queue = asyncio.Queue()
 
     async def _ws_handler(self, websocket, path):
-        if path != self.path:
-            print(f"not handling {path} as it is not the desired path {self.path}")
+        expected_path = self._conn_info["path"]
+        if path != expected_path:
+            print(f"not handling {path} as it is not the expected path {expected_path}")
             return
         for interaction in reversed(self._interactions):
             if type(interaction) == _InteractionDefinition:
@@ -191,30 +140,15 @@ class _Narrative:
 
         async def _serve():
             await asyncio.sleep(delay_startup)
-            ws = await websockets.serve(self._ws_handler, self.hostname, self.port)
+            ws = await websockets.serve(
+                self._ws_handler, self._conn_info["hostname"], self._conn_info["port"]
+            )
             await self._done
             ws.close()
             await ws.wait_closed()
 
         self._loop.run_until_complete(_serve())
         self._loop.close()
-
-    def __enter__(self):
-        self._reset()
-        self._ws_thread = threading.Thread(target=self._sync_ws)
-        self._ws_thread.start()
-        if asyncio.get_event_loop().is_running():
-            raise RuntimeError(
-                "sync narrative should control the loop, maybe you called it from within an async test?"
-            )
-        asyncio.get_event_loop().run_until_complete(wait(self._base_uri, 2))
-
-    def __exit__(self, *args, **kwargs):
-        self._loop.call_soon_threadsafe(self._done.set_result, None)
-        self._ws_thread.join()
-        errors = asyncio.get_event_loop().run_until_complete(self._verify())
-        if errors:
-            raise AssertionError(errors)
 
     async def _verify(self):
         errors = []
@@ -225,9 +159,29 @@ class _Narrative:
                 break
         return errors
 
+    def __enter__(self):
+        self._ws_thread = threading.Thread(target=self._sync_ws)
+        self._ws_thread.start()
+        if asyncio.get_event_loop().is_running():
+            raise RuntimeError(
+                "sync narrative should control the loop, maybe you called it from within an async test?"
+            )
+        asyncio.get_event_loop().run_until_complete(
+            wait(self._conn_info["base_uri"], 2)
+        )
+
+    def __exit__(self, *args, **kwargs):
+        self._loop.call_soon_threadsafe(self._done.set_result, None)
+        self._ws_thread.join()
+        errors = asyncio.get_event_loop().run_until_complete(self._verify())
+        if errors:
+            raise AssertionError(errors)
+
     async def __aenter__(self):
-        self._reset()
-        self._ws = await websockets.serve(self._ws_handler, self.hostname, self.port)
+        self._ws = await websockets.serve(
+            self._ws_handler, self._conn_info["hostname"], self._conn_info["port"]
+        )
+        return self
 
     async def __aexit__(self, *args):
         self._ws.close()
@@ -235,6 +189,89 @@ class _Narrative:
         errors = await self._verify()
         if errors:
             raise AssertionError(errors)
+
+
+class _Narrative:
+    def __init__(self, consumer: "Consumer", provider: "Provider", uri: str) -> None:
+        self.consumer = consumer
+        self.provider = provider
+        self.interactions: List[_InteractionDefinition] = []
+        self._mock: Optional[_NarrativeMock] = None
+        self.uri: str = uri
+        proto, hostname, port = uri.split(":")
+        path = ""
+        if "/" in port:
+            port, path = port.split("/")
+        if proto == "wss":
+            raise ValueError("cannot mock secure socket")
+        hostname = hostname[2:]
+        self.path = "/" + path
+        self.port = int(port)
+        self.hostname = hostname
+        self.base_uri = f"{proto}://{hostname}:{port}"
+        self._conn_info = _ConnectionInformation(
+            uri=self.uri,
+            proto=proto,
+            hostname=self.hostname,
+            port=self.port,
+            path=self.path,
+            base_uri=self.base_uri,
+        )
+
+    def given(self, provider_state: Optional[str], **params) -> "_Narrative":
+        state = None
+        if provider_state:
+            state = [{"name": provider_state, "params": params}]
+        self.interactions.insert(0, _InteractionDefinition(state))
+        return self
+
+    def and_given(self, provider_state: str, **params) -> "_Narrative":
+        raise NotImplementedError("not yet implemented")
+
+    def receives(self, scenario: str) -> "_Narrative":
+        def_ = self.interactions[-1]
+        if type(def_) == _InteractionDefinition:
+            def_.__class__ = _ReceiveDefinition
+        elif isinstance(def_, _ResponseDefinition) and not def_.events:
+            raise ValueError("receive followed an empty response scenario")
+        else:
+            def_ = _ReceiveDefinition(self.interactions[-1].provider_states)
+            self.interactions.insert(0, def_)
+        def_.scenario = scenario
+        return self
+
+    def responds_with(self, scenario: str) -> "_Narrative":
+        def_ = self.interactions[-1]
+        if type(def_) == _InteractionDefinition:
+            def_.__class__ = _ResponseDefinition
+        elif isinstance(def_, _ReceiveDefinition) and not def_.events:
+            raise ValueError("response followed an empty receive scenario")
+        else:
+            def_ = _ResponseDefinition(self.interactions[-1].provider_states)
+            self.interactions.insert(0, def_)
+        def_.scenario = scenario
+        return self
+
+    def cloudevents_in_order(self, events: List[EventDescription]) -> "_Narrative":
+        cloudevents = []
+        for event in events:
+            cloudevents.append(_Event(event))
+        self.interactions[0].events = cloudevents
+        return self
+
+    def __enter__(self):
+        self._mock = _NarrativeMock(self.interactions, self._conn_info)
+        return self._mock.__enter__()
+
+    def __exit__(self, *args, **kwargs):
+        self._mock.__exit__(*args, **kwargs)
+
+    async def __aenter__(self):
+        self._mock = _NarrativeMock(self.interactions, self._conn_info)
+        return await self._mock.__aenter__()
+
+    async def __aexit__(self, *args):
+        await self._mock.__aexit__(*args)
 
 
 class _Actor:
