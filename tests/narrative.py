@@ -108,6 +108,8 @@ class _Narrative:
         self.path = "/" + path
         self.port = int(port)
         self.hostname = hostname
+
+        # A queue on which errors will be put
         self._errors = None
 
     def __repr__(self) -> str:
@@ -124,9 +126,7 @@ class _Narrative:
         return self
 
     def and_given(self, provider_state: str, **params) -> "_Narrative":
-        # self._interactions[-1]["providerStates"].append({"name": provider_state, "params": params})
         raise NotImplementedError("not yet implemented")
-        # return self
 
     def receives(self, scenario: str) -> "_Narrative":
         def_ = self._interactions[-1]
@@ -169,7 +169,6 @@ class _Narrative:
                     "the first interaction needs to be promoted to either response or receive"
                 )
                 self._errors.put_nowait(e)
-                # raise e
             elif isinstance(interaction, _ReceiveDefinition):
                 for event in interaction.events:
                     received_event = await websocket.recv()
@@ -177,7 +176,6 @@ class _Narrative:
                         event.assert_matches(from_json(received_event))
                     except AssertionError as e:
                         self._errors.put_nowait(e)
-                        # raise
                 print("OK", interaction.scenario)
             elif isinstance(interaction, _ResponseDefinition):
                 for event in interaction.events:
@@ -186,7 +184,6 @@ class _Narrative:
             else:
                 e = TypeError(f"expected either receive or response, got {interaction}")
                 self._errors.put_nowait(e)
-                # raise e
 
     def _sync_ws(self, delay_startup=0):
         self._loop = asyncio.new_event_loop()
