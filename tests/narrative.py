@@ -96,8 +96,8 @@ class _Narrative:
         self._interactions: List[_InteractionDefinition] = []
         self._loop: Optional[AbstractEventLoop] = None
         self._ws: Optional[WebSocketServer] = None
-        self._uri = uri
-        proto, hostname, port = self._uri.split(":")
+        self.uri = uri
+        proto, hostname, port = self.uri.split(":")
         path = ""
         if "/" in port:
             port, path = port.split("/")
