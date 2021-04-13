@@ -27,6 +27,26 @@ class _ConnectionInformation(TypedDict):  # type: ignore
     path: str
     base_uri: str
 
+    @classmethod
+    def from_uri(cls, uri: str):
+        proto, hostname, port = uri.split(":")
+        path = ""
+        if "/" in port:
+            port, path = port.split("/")
+        hostname = hostname[2:]
+        path = "/" + path
+        port = int(port)
+        hostname
+        base_uri = f"{proto}://{hostname}:{port}"
+        return cls(
+            uri=uri,
+            proto=proto,
+            hostname=hostname,
+            port=port,
+            path=path,
+            base_uri=base_uri,
+        )
+
 
 class EventDescription(TypedDict):  # type: ignore
     id_: str
@@ -45,6 +65,21 @@ class _Event:
         self.datacontenttype = description.get("datacontenttype")
         self.subject = description.get("subject")
         self.data = description.get("data")
+
+    def __repr__(self) -> str:
+        s = "Event("
+        if self.source:
+            s += f"Source: {self.source} "
+        if self.type_:
+            s += f"Type_: {self.type_} "
+        if self.datacontenttype:
+            s += f"Datacontenttype: {self.datacontenttype} "
+        if self.subject:
+            s += f"Subject: {self.subject} "
+        if self.data:
+            s += f"Data: {self.data} "
+        s += f"Id: {self._id})"
+        return s
 
     def assert_matches(self, other: CloudEvent):
         msg = f"{self} did not match {other}"
@@ -83,6 +118,9 @@ class _InteractionDefinition:
         self.scenario: str = ""
         self.events: List[_Event] = []
 
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(Scenario: {self.scenario})"
+
 
 class _ReceiveDefinition(_InteractionDefinition):
     pass
@@ -101,11 +139,22 @@ class _NarrativeMock:
         self._interactions: List[_InteractionDefinition] = interactions
         self._loop: Optional[AbstractEventLoop] = None
         self._ws: Optional[WebSocketServer] = None
-        self.uri: str = conn_info["uri"]
         self._conn_info = conn_info
 
         # A queue on which errors will be put
         self._errors: asyncio.Queue = asyncio.Queue()
+
+    @property
+    def uri(self) -> str:
+        return self._conn_info["uri"]
+
+    @property
+    def hostname(self) -> str:
+        return self._conn_info["hostname"]
+
+    @property
+    def port(self) -> str:
+        return self._conn_info["port"]
 
     async def _ws_handler(self, websocket, path):
         expected_path = self._conn_info["path"]
@@ -169,6 +218,7 @@ class _NarrativeMock:
         asyncio.get_event_loop().run_until_complete(
             wait(self._conn_info["base_uri"], 2)
         )
+        return self
 
     def __exit__(self, *args, **kwargs):
         self._loop.call_soon_threadsafe(self._done.set_result, None)
@@ -192,31 +242,12 @@ class _NarrativeMock:
 
 
 class _Narrative:
-    def __init__(self, consumer: "Consumer", provider: "Provider", uri: str) -> None:
+    def __init__(self, consumer: "Consumer", provider: "Provider") -> None:
         self.consumer = consumer
         self.provider = provider
         self.interactions: List[_InteractionDefinition] = []
         self._mock: Optional[_NarrativeMock] = None
-        self.uri: str = uri
-        proto, hostname, port = uri.split(":")
-        path = ""
-        if "/" in port:
-            port, path = port.split("/")
-        if proto == "wss":
-            raise ValueError("cannot mock secure socket")
-        hostname = hostname[2:]
-        self.path = "/" + path
-        self.port = int(port)
-        self.hostname = hostname
-        self.base_uri = f"{proto}://{hostname}:{port}"
-        self._conn_info = _ConnectionInformation(
-            uri=self.uri,
-            proto=proto,
-            hostname=self.hostname,
-            port=self.port,
-            path=self.path,
-            base_uri=self.base_uri,
-        )
+        self._conn_info: Optional[_ConnectionInformation] = None
 
     def given(self, provider_state: Optional[str], **params) -> "_Narrative":
         state = None
@@ -259,7 +290,19 @@ class _Narrative:
         self.interactions[0].events = cloudevents
         return self
 
+    def on_uri(self, uri: str) -> "_Narrative":
+        self._conn_info = _ConnectionInformation.from_uri(uri)
+        return self
+
+    @property
+    def uri(self) -> str:
+        if not self._conn_info:
+            raise ValueError("no connection information")
+        return self._conn_info.get("uri")
+
     def __enter__(self):
+        if not self._conn_info:
+            raise ValueError("no connection info on mock")
         self._mock = _NarrativeMock(self.interactions, self._conn_info)
         return self._mock.__enter__()
 
@@ -267,6 +310,8 @@ class _Narrative:
         self._mock.__exit__(*args, **kwargs)
 
     async def __aenter__(self):
+        if not self._conn_info:
+            raise ValueError("no connection info on mock")
         self._mock = _NarrativeMock(self.interactions, self._conn_info)
         return await self._mock.__aenter__()
 
@@ -287,5 +332,5 @@ class Provider(_Actor):
 
 
 class Consumer(_Actor):
-    def forms_narrative_with(self, provider: Provider, uri, **kwargs) -> _Narrative:
-        return _Narrative(self, provider, uri, **kwargs)
+    def forms_narrative_with(self, provider: Provider, **kwargs) -> _Narrative:
+        return _Narrative(self, provider, **kwargs)

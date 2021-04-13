@@ -10,13 +10,15 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_interaction(unused_tcp_port):
-    narrative = Consumer("Consumer").forms_narrative_with(
-        Provider("Provider"), f"ws://localhost:{unused_tcp_port}"
-    )
-    narrative.given("some data exists").receives("a request").cloudevents_in_order(
-        [EventDescription(type_="start", source="/consumer")]
-    ).responds_with("an end response").cloudevents_in_order(
-        [EventDescription(type_="end", source="/provider")]
+    narrative = (
+        Consumer("Consumer")
+        .forms_narrative_with(Provider("Provider"))
+        .given("some data exists")
+        .receives("a request")
+        .cloudevents_in_order([EventDescription(type_="start", source="/consumer")])
+        .responds_with("an end response")
+        .cloudevents_in_order([EventDescription(type_="end", source="/provider")])
+        .on_uri(f"ws://localhost:{unused_tcp_port}")
     )
     async with narrative:
         async with websockets.connect(narrative.uri) as websocket:
