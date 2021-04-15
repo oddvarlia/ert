@@ -231,10 +231,12 @@ class TestEnsemble(_Ensemble):
                                 inputs=[],
                                 outputs=[],
                                 jobs=[
-                                    _BaseJob(id_=job_no, name=f"job-{job_no}")
+                                    _BaseJob(id_=job_no, name=f"job-{job_no}", step_source="")
                                     for job_no in range(0, jobs)
                                 ],
                                 name=f"step-{step_no}",
+                                ee_url="",
+                                source="",
                             )
                             for step_no in range(0, steps)
                         ],
