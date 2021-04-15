@@ -356,10 +356,14 @@ def test_ensemble_monitor_communication_given_success(ee_config):
     with ee.run() as monitor:
         for event in monitor.track():
             print(event)
-            if event.data and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED:
+            if (
+                event.data
+                and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED
+            ):
                 monitor.signal_done()
 
     ensemble.join()
+
 
 def test_ensemble_monitor_communication_given_failing_job(ee_config):
     ensemble = TestEnsemble(iter=1, reals=2, stages=2, steps=2, jobs=2)
@@ -373,7 +377,10 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config):
     with ee.run() as monitor:
         for event in monitor.track():
             print(event)
-            if event.data and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED:
+            if (
+                event.data
+                and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED
+            ):
                 monitor.signal_done()
 
     ensemble.join()
