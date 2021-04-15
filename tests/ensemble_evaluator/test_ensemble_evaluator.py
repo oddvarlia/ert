@@ -3,11 +3,17 @@ import pytest
 import asyncio
 import threading
 from unittest.mock import Mock
+
+from pytest_asyncio.plugin import unused_tcp_port
+
+from ert_shared.ensemble_evaluator.entity.ensemble_base import _Ensemble
 from ert_shared.status.entity.state import (
     ENSEMBLE_STATE_STARTED,
     JOB_STATE_FAILURE,
     JOB_STATE_FINISHED,
     JOB_STATE_RUNNING,
+    ENSEMBLE_STATE_STOPPED,
+    ENSEMBLE_STATE_FAILED,
 )
 from cloudevents.http import to_json
 from cloudevents.http.event import CloudEvent
@@ -21,9 +27,14 @@ from ert_shared.ensemble_evaluator.entity.ensemble import (
     create_realization_builder,
     create_step_builder,
     create_legacy_job_builder,
+    _Realization,
+    _Stage,
+    _Step,
+    _BaseJob,
 )
 import ert_shared.ensemble_evaluator.entity.identifiers as identifiers
 from ert_shared.ensemble_evaluator.entity.snapshot import Snapshot
+from tests.narrative import Consumer, Provider, EventDescription
 
 
 @pytest.fixture
@@ -197,6 +208,175 @@ def test_dispatchers_can_connect_and_monitor_can_shut_down_evaluator(evaluator):
                 for e in [events, events2]:
                     for _ in e:
                         assert False, "got unexpected event from monitor"
+
+
+class TestEnsemble(_Ensemble):
+    def __init__(self, iter, reals, stages, steps, jobs):
+        self.iter = iter
+        self.reals = reals
+        self.stages = stages
+        self.steps = steps
+        self.jobs = jobs
+        self.fail_jobs = []
+
+        the_reals = [
+            _Realization(
+                real_no,
+                stages=[
+                    _Stage(
+                        id_=stage_no,
+                        steps=[
+                            _Step(
+                                id_=step_no,
+                                inputs=[],
+                                outputs=[],
+                                jobs=[
+                                    _BaseJob(id_=job_no, name=f"job-{job_no}")
+                                    for job_no in range(0, jobs)
+                                ],
+                                name=f"step-{step_no}",
+                            )
+                            for step_no in range(0, steps)
+                        ],
+                        status="unknown",
+                        name=f"stage-{stage_no}",
+                    )
+                    for stage_no in range(0, stages)
+                ],
+                active=True,
+            )
+            for real_no in range(0, reals)
+        ]
+        super().__init__(the_reals, {})
+
+    def _evaluate(self, host, port, ee_id):
+        event_id = 0
+        with Client(host, port, "/dispatch") as dispatch:
+            send_dispatch_event(
+                dispatch,
+                identifiers.EVTYPE_ENSEMBLE_STARTED,
+                f"/ert/ee/{ee_id}",
+                f"event-{event_id}",
+                None,
+            )
+            event_id = event_id + 1
+            for real in range(0, self.reals):
+                for stage in range(0, self.stages):
+                    for step in range(0, self.stages):
+                        job_failed = False
+                        send_dispatch_event(
+                            dispatch,
+                            identifiers.EVTYPE_FM_STEP_START,
+                            f"/ert/ee/{ee_id}/real/{real}/stage/{stage}/step/{step}",
+                            f"event-{event_id}",
+                            None,
+                        )
+                        event_id = event_id + 1
+                        for job in range(0, self.jobs):
+                            send_dispatch_event(
+                                dispatch,
+                                identifiers.EVTYPE_FM_JOB_RUNNING,
+                                f"/ert/ee/{ee_id}/real/{real}/stage/{stage}/step/{step}/job/{job}",
+                                f"event-{event_id}",
+                                {"current_memory_usage": 1000},
+                            )
+                            event_id = event_id + 1
+                            if self._shouldFailJob(real, stage, step, job):
+                                send_dispatch_event(
+                                    dispatch,
+                                    identifiers.EVTYPE_FM_JOB_FAILURE,
+                                    f"/ert/ee/{ee_id}/real/{real}/stage/{stage}/step/{step}/job/{job}",
+                                    f"event-{event_id}",
+                                    {},
+                                )
+                                event_id = event_id + 1
+                                job_failed = True
+                                break
+                            else:
+                                send_dispatch_event(
+                                    dispatch,
+                                    identifiers.EVTYPE_FM_JOB_SUCCESS,
+                                    f"/ert/ee/{ee_id}/real/{real}/stage/{stage}/step/{step}/job/{job}",
+                                    f"event-{event_id}",
+                                    {"current_memory_usage": 1000},
+                                )
+                                event_id = event_id + 1
+                        if job_failed:
+                            send_dispatch_event(
+                                dispatch,
+                                identifiers.EVTYPE_FM_STEP_FAILURE,
+                                f"/ert/ee/{ee_id}/real/{real}/stage/{stage}/step/{step}/job/{job}",
+                                f"event-{event_id}",
+                                {},
+                            )
+                            event_id = event_id + 1
+                        else:
+                            send_dispatch_event(
+                                dispatch,
+                                identifiers.EVTYPE_FM_STEP_SUCCESS,
+                                f"/ert/ee/{ee_id}/real/{real}/stage/{stage}/step/{step}/job/{job}",
+                                f"event-{event_id}",
+                                {},
+                            )
+                            event_id = event_id + 1
+
+            send_dispatch_event(
+                dispatch,
+                identifiers.EVTYPE_ENSEMBLE_STOPPED,
+                f"/ert/ee/{ee_id}",
+                f"event-{event_id}",
+                None,
+            )
+
+    def join(self):
+        self._eval_thread.join()
+
+    def evaluate(self, config, ee_id):
+        self._eval_thread = threading.Thread(
+            target=self._evaluate,
+            args=(config.host, config.port, ee_id),
+        )
+        self._eval_thread.start()
+
+    def _shouldFailJob(self, real, stage, step, job):
+        return (real, stage, step, job) in self.fail_jobs
+
+    def addFailJob(self, real, stage, step, job):
+        self.fail_jobs.append((real, stage, step, job))
+
+
+def test_ensemble_monitor_communication_given_success(ee_config):
+    ensemble = TestEnsemble(iter=1, reals=2, stages=2, steps=2, jobs=2)
+    ee = EnsembleEvaluator(
+        ensemble,
+        ee_config,
+        0,
+        ee_id="ee-0",
+    )
+    with ee.run() as monitor:
+        for event in monitor.track():
+            print(event)
+            if event.data and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED:
+                monitor.signal_done()
+
+    ensemble.join()
+
+def test_ensemble_monitor_communication_given_failing_job(ee_config):
+    ensemble = TestEnsemble(iter=1, reals=2, stages=2, steps=2, jobs=2)
+    ensemble.addFailJob(real=1, stage=1, step=0, job=1)
+    ee = EnsembleEvaluator(
+        ensemble,
+        ee_config,
+        0,
+        ee_id="ee-0",
+    )
+    with ee.run() as monitor:
+        for event in monitor.track():
+            print(event)
+            if event.data and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED:
+                monitor.signal_done()
+
+    ensemble.join()
 
 
 def test_monitor_stop(evaluator):
