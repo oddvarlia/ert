@@ -351,8 +351,8 @@ class TestEnsemble(_Ensemble):
     def addFailJob(self, real, stage, step, job):
         self.fail_jobs.append((real, stage, step, job))
 
-class Dialogue(object):
 
+class Dialogue(object):
     def __init__(self, client_name, server_name, state_name):
         self.client_name = client_name
         self.server_name = server_name
@@ -419,24 +419,33 @@ def test_ensemble_monitor_communication_given_success(ee_config):
         0,
         ee_id="ee-0",
     )
-    dialogue = Dialogue(client_name="monitor", server_name="evaluator", state_name="a successfull ensemble")
+    dialogue = Dialogue(
+        client_name="monitor",
+        server_name="evaluator",
+        state_name="a successfull ensemble",
+    )
     dialogue.server2client(
-        "initial snapshot",
-        EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT))
+        "initial snapshot", EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT)
+    )
     dialogue.server2client(
         "snapshot updates",
-        EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE), n=26)
+        EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE),
+        n=26,
+    )
     dialogue.server2client(
         "snapshot update stopped",
         EventDescription(
             type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
-            data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED}))
+            data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED},
+        ),
+    )
     dialogue.client2server(
-        "monitor done event",
-        EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE))
+        "monitor done event", EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE)
+    )
     dialogue.server2client(
         "evaluator termination event",
-        EventDescription(type_=identifiers.EVTYPE_EE_TERMINATED))
+        EventDescription(type_=identifiers.EVTYPE_EE_TERMINATED),
+    )
 
     ee.run()
     with dialogue.proxy(ee_config.url) as port:
