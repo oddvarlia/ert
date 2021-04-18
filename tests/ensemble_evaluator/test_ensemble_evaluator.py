@@ -1,7 +1,10 @@
+from contextlib import contextmanager
+
 import websockets
 import pytest
 import asyncio
 import threading
+import queue
 from unittest.mock import Mock
 
 from pytest_asyncio.plugin import unused_tcp_port
@@ -348,6 +351,65 @@ class TestEnsemble(_Ensemble):
     def addFailJob(self, real, stage, step, job):
         self.fail_jobs.append((real, stage, step, job))
 
+class Dialogue(object):
+
+    def __init__(self, client_name, server_name, state_name):
+        self.client_name = client_name
+        self.server_name = server_name
+        self.state_name = state_name
+        self.events = []
+
+    def client2server(self, description, event):
+        self.events.append((description, event))
+
+    def server2client(self, description, event, n=1):
+        self.events.append((description, event))
+
+    async def _async_proxy(self, url, q):
+        done = asyncio.get_event_loop().create_future()
+
+        async def handle_server(server, client):
+            async for msg in server:
+                print("FROM SERVER:")
+                print(msg)
+                print()
+                await client.send(msg)
+
+        async def handle_client(client, _path):
+            async with websockets.connect(url + _path) as server:
+                server_task = asyncio.create_task(handle_server(server, client))
+                try:
+                    async for msg in client:
+                        print("FROM CLIENT:")
+                        print(msg)
+                        print()
+                        await server.send(msg)
+                finally:
+                    server_task.cancel()
+
+        async with websockets.serve(handle_client, host="localhost", port=0) as s:
+            port = s.sockets[0].getsockname()[1]
+            asyncio.get_event_loop().run_in_executor(None, lambda: q.put(port))
+            asyncio.get_event_loop().run_in_executor(None, lambda: q.put(done))
+            await done
+
+    def _proxy(self, url, q):
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        q.put(asyncio.get_event_loop())
+        asyncio.get_event_loop().run_until_complete(self._async_proxy(url, q))
+
+    @contextmanager
+    def proxy(self, url):
+        q = queue.Queue()
+        t = threading.Thread(target=self._proxy, args=(url, q))
+        t.start()
+        loop = q.get()
+        port = q.get()
+        done = q.get()
+        yield port
+        loop.call_soon_threadsafe(done.set_result, None)
+        t.join()
+
 
 def test_ensemble_monitor_communication_given_success(ee_config):
     ensemble = TestEnsemble(iter=1, reals=2, stages=2, steps=2, jobs=2)
@@ -357,14 +419,34 @@ def test_ensemble_monitor_communication_given_success(ee_config):
         0,
         ee_id="ee-0",
     )
-    with ee.run() as monitor:
-        for event in monitor.track():
-            print(event)
-            if (
-                event.data
-                and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED
-            ):
-                monitor.signal_done()
+    dialogue = Dialogue(client_name="monitor", server_name="evaluator", state_name="a successfull ensemble")
+    dialogue.server2client(
+        "initial snapshot",
+        EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT))
+    dialogue.server2client(
+        "snapshot updates",
+        EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE), n=26)
+    dialogue.server2client(
+        "snapshot update stopped",
+        EventDescription(
+            type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+            data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED}))
+    dialogue.client2server(
+        "monitor done event",
+        EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE))
+    dialogue.server2client(
+        "evaluator termination event",
+        EventDescription(type_=identifiers.EVTYPE_EE_TERMINATED))
+
+    ee.run()
+    with dialogue.proxy(ee_config.url) as port:
+        with ee_monitor.create("localhost", port) as monitor:
+            for event in monitor.track():
+                if (
+                    event.data
+                    and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED
+                ):
+                    monitor.signal_done()
 
     ensemble.join()
 
