@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 from pytest_asyncio.plugin import unused_tcp_port
 
+from ert_shared.ensemble_evaluator.entity import serialization
 from ert_shared.ensemble_evaluator.entity.ensemble_base import _Ensemble
 from ert_shared.status.entity.state import (
     ENSEMBLE_STATE_STARTED,
@@ -18,7 +19,7 @@ from ert_shared.status.entity.state import (
     ENSEMBLE_STATE_STOPPED,
     ENSEMBLE_STATE_FAILED,
 )
-from cloudevents.http import to_json
+from cloudevents.http import to_json, from_json
 from cloudevents.http.event import CloudEvent
 from ert_shared.ensemble_evaluator.evaluator import (
     EnsembleEvaluator,
@@ -343,6 +344,8 @@ class TestEnsemble(_Ensemble):
             target=self._evaluate,
             args=(config.host, config.port, ee_id),
         )
+
+    def start(self):
         self._eval_thread.start()
 
     def _shouldFailJob(self, real, stage, step, job):
@@ -353,6 +356,9 @@ class TestEnsemble(_Ensemble):
 
 
 class Dialogue(object):
+    CLIENT2SERVER = 0
+    SERVER2CLIENT = 1
+
     def __init__(self, client_name, server_name, state_name):
         self.client_name = client_name
         self.server_name = server_name
@@ -360,30 +366,48 @@ class Dialogue(object):
         self.events = []
 
     def client2server(self, description, event):
-        self.events.append((description, event))
+        self.events.append((Dialogue.CLIENT2SERVER, description, event))
 
     def server2client(self, description, event, n=1):
-        self.events.append((description, event))
+        self.events.extend(
+            [(Dialogue.SERVER2CLIENT, description, event) for _i in range(0, n)]
+        )
 
     async def _async_proxy(self, url, q):
         done = asyncio.get_event_loop().create_future()
 
-        async def handle_server(server, client):
+        async def handle_server(server, client, events):
             async for msg in server:
                 print("FROM SERVER:")
                 print(msg)
                 print()
+                ce = from_json(
+                    msg, data_unmarshaller=serialization.evaluator_unmarshaller
+                )
+                event = events.pop(0)
+                assert event[0] == Dialogue.SERVER2CLIENT
+                assert event[2]["type_"] == ce["type"]
                 await client.send(msg)
 
         async def handle_client(client, _path):
             async with websockets.connect(url + _path) as server:
-                server_task = asyncio.create_task(handle_server(server, client))
+                events = self.events.copy()
+                server_task = asyncio.create_task(handle_server(server, client, events))
                 try:
                     async for msg in client:
                         print("FROM CLIENT:")
                         print(msg)
                         print()
+                        ce = from_json(
+                            msg, data_unmarshaller=serialization.evaluator_unmarshaller
+                        )
+                        event = events.pop(0)
+                        assert event[0] == Dialogue.CLIENT2SERVER
+                        assert event[2]["type_"] == ce["type"]
                         await server.send(msg)
+                except Exception as e:
+                    print(e)
+                    raise
                 finally:
                     server_task.cancel()
 
@@ -430,7 +454,7 @@ def test_ensemble_monitor_communication_given_success(ee_config):
     dialogue.server2client(
         "snapshot updates",
         EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE),
-        n=26,
+        n=49,
     )
     dialogue.server2client(
         "snapshot update stopped",
@@ -451,7 +475,9 @@ def test_ensemble_monitor_communication_given_success(ee_config):
     with dialogue.proxy(ee_config.url) as port:
         with ee_monitor.create("localhost", port) as monitor:
             for event in monitor.track():
-                if (
+                if event["type"] == identifiers.EVTYPE_EE_SNAPSHOT:
+                    ensemble.start()
+                elif (
                     event.data
                     and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED
                 ):
