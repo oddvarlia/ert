@@ -5,40 +5,26 @@ import pytest
 import asyncio
 import threading
 import queue
-from unittest.mock import Mock
 
-from pytest_asyncio.plugin import unused_tcp_port
-
+from ert_shared.ensemble_evaluator.client import Client
 from ert_shared.ensemble_evaluator.entity import serialization
-from ert_shared.ensemble_evaluator.entity.ensemble_base import _Ensemble
 from ert_shared.status.entity.state import (
     ENSEMBLE_STATE_STARTED,
     JOB_STATE_FAILURE,
     JOB_STATE_FINISHED,
     JOB_STATE_RUNNING,
     ENSEMBLE_STATE_STOPPED,
-    ENSEMBLE_STATE_FAILED,
 )
-from cloudevents.http import to_json, from_json
-from cloudevents.http.event import CloudEvent
+from cloudevents.http import from_json
 from ert_shared.ensemble_evaluator.evaluator import (
     EnsembleEvaluator,
     ee_monitor,
 )
 from ert_shared.ensemble_evaluator.config import EvaluatorServerConfig
-from ert_shared.ensemble_evaluator.entity.ensemble import (
-    create_ensemble_builder,
-    create_realization_builder,
-    create_step_builder,
-    create_legacy_job_builder,
-    _Realization,
-    _Stage,
-    _Step,
-    _BaseJob,
-)
 import ert_shared.ensemble_evaluator.entity.identifiers as identifiers
 from ert_shared.ensemble_evaluator.entity.snapshot import Snapshot
-from tests.narrative import Consumer, Provider, EventDescription
+from tests.ensemble_evaluator.ensemble_test import TestEnsemble, send_dispatch_event
+from tests.narrative import EventDescription
 
 
 @pytest.fixture
@@ -48,34 +34,7 @@ def ee_config(unused_tcp_port):
 
 @pytest.fixture
 def evaluator(ee_config):
-    ensemble = (
-        create_ensemble_builder()
-        .add_realization(
-            real=create_realization_builder()
-            .active(True)
-            .set_iens(0)
-            .add_step(
-                step=create_step_builder()
-                .set_id("0")
-                .set_name("cats")
-                .add_job(
-                    job=create_legacy_job_builder()
-                    .set_id(0)
-                    .set_name("cat")
-                    .set_ext_job(Mock())
-                )
-                .add_job(
-                    job=create_legacy_job_builder()
-                    .set_id(1)
-                    .set_name("cat2")
-                    .set_ext_job(Mock())
-                )
-                .set_dummy_io()
-            )
-        )
-        .set_ensemble_size(2)
-        .build()
-    )
+    ensemble = TestEnsemble(0, 2, 1, 2)
     ee = EnsembleEvaluator(
         ensemble,
         ee_config,
@@ -86,67 +45,20 @@ def evaluator(ee_config):
     ee.stop()
 
 
-class Client:
-    def __enter__(self):
-        self.thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        self.stop()
-
-    def __init__(self, host, port, path):
-        self.host = host
-        self.port = port
-        self.path = path
-        self.loop = asyncio.new_event_loop()
-        self.q = asyncio.Queue(loop=self.loop)
-        self.thread = threading.Thread(
-            name="test_websocket_client", target=self._run, args=(self.loop,)
-        )
-
-    def _run(self, loop):
-        asyncio.set_event_loop(loop)
-        uri = f"ws://{self.host}:{self.port}{self.path}"
-
-        async def send_loop(q):
-            async with websockets.connect(uri) as websocket:
-                while True:
-                    msg = await q.get()
-                    if msg == "stop":
-                        return
-                    await websocket.send(msg)
-
-        loop.run_until_complete(send_loop(self.q))
-
-    def send(self, msg):
-        self.loop.call_soon_threadsafe(self.q.put_nowait, msg)
-
-    def stop(self):
-        self.loop.call_soon_threadsafe(self.q.put_nowait, "stop")
-        self.thread.join()
-        self.loop.close()
-
-
-def send_dispatch_event(client, event_type, source, event_id, data):
-    event1 = CloudEvent({"type": event_type, "source": source, "id": event_id}, data)
-    client.send(to_json(event1))
-
-
 def test_dispatchers_can_connect_and_monitor_can_shut_down_evaluator(evaluator):
     with evaluator.run() as monitor:
         events = monitor.track()
-
         host = evaluator._config.host
         port = evaluator._config.port
-
+        url = evaluator._config.url
         # first snapshot before any event occurs
         snapshot_event = next(events)
         snapshot = Snapshot(snapshot_event.data)
         assert snapshot.get_status() == ENSEMBLE_STATE_STARTED
         # two dispatchers connect
-        with Client(host, port, "/dispatch") as dispatch1, Client(
-            host, port, "/dispatch"
-        ) as dispatch2:
+
+        with Client(url + "/dispatch", max_retries=1, timeout_multiplier=1) as dispatch1, \
+                Client(url + "/dispatch", max_retries=1, timeout_multiplier=1) as dispatch2:
 
             # first dispatcher informs that job 0 is running
             send_dispatch_event(
@@ -212,135 +124,6 @@ def test_dispatchers_can_connect_and_monitor_can_shut_down_evaluator(evaluator):
                 for e in [events, events2]:
                     for _ in e:
                         assert False, "got unexpected event from monitor"
-
-
-class TestEnsemble(_Ensemble):
-    def __init__(self, iter, reals, steps, jobs):
-        self.iter = iter
-        self.reals = reals
-        self.steps = steps
-        self.jobs = jobs
-        self.fail_jobs = []
-
-        the_reals = [
-            _Realization(
-                real_no,
-                steps=[
-                    _Step(
-                        id_=step_no,
-                        inputs=[],
-                        outputs=[],
-                        jobs=[
-                            _BaseJob(id_=job_no, name=f"job-{job_no}", step_source="")
-                            for job_no in range(0, jobs)
-                        ],
-                        name=f"step-{step_no}",
-                        ee_url="",
-                        source="",
-                    )
-                    for step_no in range(0, steps)
-                ],
-                active=True,
-            )
-            for real_no in range(0, reals)
-        ]
-        super().__init__(the_reals, {})
-
-    def _evaluate(self, host, port, ee_id):
-        event_id = 0
-        with Client(host, port, "/dispatch") as dispatch:
-            send_dispatch_event(
-                dispatch,
-                identifiers.EVTYPE_ENSEMBLE_STARTED,
-                f"/ert/ee/{ee_id}",
-                f"event-{event_id}",
-                None,
-            )
-            event_id = event_id + 1
-            for real in range(0, self.reals):
-                for step in range(0, self.steps):
-                    job_failed = False
-                    send_dispatch_event(
-                        dispatch,
-                        identifiers.EVTYPE_FM_STEP_UNKNOWN,
-                        f"/ert/ee/{ee_id}/real/{real}/step/{step}",
-                        f"event-{event_id}",
-                        None,
-                    )
-                    event_id = event_id + 1
-                    for job in range(0, self.jobs):
-                        send_dispatch_event(
-                            dispatch,
-                            identifiers.EVTYPE_FM_JOB_RUNNING,
-                            f"/ert/ee/{ee_id}/real/{real}/step/{step}/job/{job}",
-                            f"event-{event_id}",
-                            {"current_memory_usage": 1000},
-                        )
-                        event_id = event_id + 1
-                        if self._shouldFailJob(real, step, job):
-                            send_dispatch_event(
-                                dispatch,
-                                identifiers.EVTYPE_FM_JOB_FAILURE,
-                                f"/ert/ee/{ee_id}/real/{real}/step/{step}/job/{job}",
-                                f"event-{event_id}",
-                                {},
-                            )
-                            event_id = event_id + 1
-                            job_failed = True
-                            break
-                        else:
-                            send_dispatch_event(
-                                dispatch,
-                                identifiers.EVTYPE_FM_JOB_SUCCESS,
-                                f"/ert/ee/{ee_id}/real/{real}/step/{step}/job/{job}",
-                                f"event-{event_id}",
-                                {"current_memory_usage": 1000},
-                            )
-                            event_id = event_id + 1
-                    if job_failed:
-                        send_dispatch_event(
-                            dispatch,
-                            identifiers.EVTYPE_FM_STEP_FAILURE,
-                            f"/ert/ee/{ee_id}/real/{real}/step/{step}/job/{job}",
-                            f"event-{event_id}",
-                            {},
-                        )
-                        event_id = event_id + 1
-                    else:
-                        send_dispatch_event(
-                            dispatch,
-                            identifiers.EVTYPE_FM_STEP_SUCCESS,
-                            f"/ert/ee/{ee_id}/real/{real}/step/{step}/job/{job}",
-                            f"event-{event_id}",
-                            {},
-                        )
-                        event_id = event_id + 1
-
-            send_dispatch_event(
-                dispatch,
-                identifiers.EVTYPE_ENSEMBLE_STOPPED,
-                f"/ert/ee/{ee_id}",
-                f"event-{event_id}",
-                None,
-            )
-
-    def join(self):
-        self._eval_thread.join()
-
-    def evaluate(self, config, ee_id):
-        self._eval_thread = threading.Thread(
-            target=self._evaluate,
-            args=(config.host, config.port, ee_id),
-        )
-
-    def start(self):
-        self._eval_thread.start()
-
-    def _shouldFailJob(self, real, step, job):
-        return (real, 0, step, job) in self.fail_jobs
-
-    def addFailJob(self, real, step, job):
-        self.fail_jobs.append((real, 0, step, job))
 
 
 class Dialogue(object):
