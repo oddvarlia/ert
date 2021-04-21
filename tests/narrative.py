@@ -279,8 +279,10 @@ class _ProviderVerifier:
                             self._errors.put_nowait(e)
                     print("OK", interaction.scenario)
                 elif isinstance(interaction, _RecurringResponse):
+                    event_counter = 0
                     while True:
                         received_event = await websocket.recv()
+                        event_counter += 1
                         try:
                             interaction.assert_matches(
                                 from_json(
@@ -292,7 +294,7 @@ class _ProviderVerifier:
                         except AssertionError as e:
                             self._errors.put_nowait(e)
                             break
-                    print("OK", interaction.scenario)
+                    print(f"OK ({event_counter} events)", interaction.scenario)
                 elif isinstance(interaction, _RecurringRequest):
                     raise TypeError("don't know how to request recurringly")
                 else:
@@ -389,8 +391,10 @@ class _ProviderMock:
                 )
                 print("OK", interaction.scenario)
             elif isinstance(interaction, _RecurringRequest):
+                event_counter = 0
                 while True:
                     received_event = await websocket.recv()
+                    event_counter += 1
                     try:
                         interaction.assert_matches(received_event)
                     except _InteractionTermination:
@@ -398,7 +402,7 @@ class _ProviderMock:
                     except AssertionError as e:
                         self._errors.put_nowait(e)
                         break
-                print("OK", interaction.scenario)
+                print(f"OK ({event_counter} events)", interaction.scenario)
             else:
                 e = TypeError(f"expected either receive or response, got {interaction}")
                 self._errors.put_nowait(e)
