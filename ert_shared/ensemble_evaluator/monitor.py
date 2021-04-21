@@ -84,6 +84,7 @@ class _Monitor:
         self._ws = await websockets.connect(
             self._client_uri, max_size=2 ** 26, max_queue=500
         )
+
         async for message in self._ws:
             event = from_json(
                 message, data_unmarshaller=serialization.evaluator_unmarshaller
@@ -100,6 +101,7 @@ class _Monitor:
         self._receive_future = self._loop.create_task(self._receive())
         try:
             self._loop.run_until_complete(self._receive_future)
+            self._incoming.put_nowait("end")
         except asyncio.CancelledError:
             logger.debug(f"monitor-{self._id} receive cancelled")
         self._loop.run_until_complete(done_future)
@@ -120,6 +122,8 @@ class _Monitor:
                 event = asyncio.run_coroutine_threadsafe(
                     self._incoming.get(), self._loop
                 ).result()
+                if not isinstance(event, CloudEvent):
+                    break
                 yield event
             self._loop.call_soon_threadsafe(done_future.set_result, None)
         except GeneratorExit:

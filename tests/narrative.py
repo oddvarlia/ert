@@ -68,13 +68,14 @@ class EventDescription(TypedDict):  # type: ignore
 
 
 class _Event:
-    def __init__(self, description: EventDescription) -> None:
+    def __init__(self, description: EventDescription, repeating=False) -> None:
         self._id = description.get("id_", uuid.uuid4())
         self.source = description["source"]
         self.type_ = description["type_"]
         self.datacontenttype = description.get("datacontenttype")
         self.subject = description.get("subject")
         self.data = description.get("data")
+        self.repeating = repeating
 
     def __repr__(self) -> str:
         s = "Event("
@@ -84,6 +85,7 @@ class _Event:
             (self.datacontenttype, "Datacontenttype"),
             (self.subject, "Subject"),
             (self.data, "Data"),
+            (self.repeating, "Repeating"),
         ]:
             if isinstance(attr[0], ReMatch):
                 s += f"{attr[1]}: {attr[0].regex} "
@@ -525,6 +527,11 @@ class _Narrative:
         self.interactions[-1].events = events_list
         self.interactions[-1].scenario = interaction.scenario
         return self
+
+    def cloudevents_repeating(self, event: EventDescription) -> "_Narrative":
+        self.interactions[0].events = [_Event(event, repeating=True)]
+        return self
+
 
     def on_uri(self, uri: str) -> "_Narrative":
         self._conn_info = _ConnectionInformation.from_uri(uri)

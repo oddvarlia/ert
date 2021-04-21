@@ -47,7 +47,7 @@ class TestEnsemble(_Ensemble):
 
     def _evaluate(self, url, ee_id):
         event_id = 0
-        with Client(url) as dispatch:
+        with Client(url + "/dispatch") as dispatch:
             send_dispatch_event(
                 dispatch,
                 identifiers.EVTYPE_ENSEMBLE_STARTED,
@@ -130,6 +130,7 @@ class TestEnsemble(_Ensemble):
         self._eval_thread = threading.Thread(
             target=self._evaluate,
             args=(config.dispatch_uri, ee_id),
+            name = "TestEnseble",
         )
 
     def start(self):
