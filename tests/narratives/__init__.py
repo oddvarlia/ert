@@ -1,5 +1,14 @@
-from ert_shared.status.entity.state import ENSEMBLE_STATE_STOPPED
-from tests.narrative import Consumer, EventDescription, Provider
+import re
+from ert_shared.status.entity.state import (
+    ENSEMBLE_STATE_STARTED,
+    ENSEMBLE_STATE_STOPPED,
+)
+from tests.narrative import (
+    Consumer,
+    EventDescription,
+    Provider,
+    ReMatch,
+)
 import ert_shared.ensemble_evaluator.entity.identifiers as identifiers
 
 
@@ -40,22 +49,35 @@ monitor_happy_path_narrative = (
         Provider("Ensemble Evaluator"),
     )
     .given("a successful one-member one-step one-job ensemble")
-    .responds_with("nominal event flow")
+    .responds_with("starting snapshot")
     .cloudevents_in_order(
         [
-            EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT, source="/provider"),
             EventDescription(
-                type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
-                source="/provider",
-                data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED},
+                type_=identifiers.EVTYPE_EE_SNAPSHOT,
+                source=ReMatch(re.compile(r"/ert/ee/ee."), "/ert/ee/ee-0"),
             ),
         ]
+    )
+    .responds_with("a bunch of snapshot updates")
+    .repeating_unordered_events(
+        [
+            EventDescription(
+                type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                source=ReMatch(re.compile(r"/ert/ee/ee."), "/ert/ee/ee-0"),
+            ),
+        ],
+        terminator=EventDescription(
+            type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+            source=ReMatch(re.compile(r"/ert/ee/ee."), "/ert/ee/ee-0"),
+            data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED},
+        ),
     )
     .receives("done")
     .cloudevents_in_order(
         [
             EventDescription(
-                type_=identifiers.EVTYPE_EE_USER_DONE, source="/ert/monitor/*"
+                type_=identifiers.EVTYPE_EE_USER_DONE,
+                source=ReMatch(re.compile(r"/ert/monitor/."), "/ert/monitor/007"),
             ),
         ]
     )
@@ -63,7 +85,8 @@ monitor_happy_path_narrative = (
     .cloudevents_in_order(
         [
             EventDescription(
-                type_=identifiers.EVTYPE_EE_TERMINATED, source="/provider"
+                type_=identifiers.EVTYPE_EE_TERMINATED,
+                source=ReMatch(re.compile(r"/ert/ee/ee."), "/ert/ee/ee-0"),
             ),
         ]
     )

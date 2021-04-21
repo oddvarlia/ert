@@ -1,10 +1,14 @@
 import asyncio
 from asyncio.events import AbstractEventLoop
 from asyncio.queues import QueueEmpty
-from typing import Any, Dict, List, Optional
+from datetime import date
+from enum import Enum, auto
+import re
+from typing import Any, Dict, Iterator, List, Optional, Union
 import uuid
 import threading
-import functools
+
+from cloudevents.sdk import types
 from ert_shared.ensemble_evaluator.ws_util import wait
 from websockets.server import WebSocketServer
 
@@ -48,12 +52,18 @@ class _ConnectionInformation(TypedDict):  # type: ignore
         )
 
 
+class ReMatch:
+    def __init__(self, regex: re.Pattern, replace_with: str) -> None:
+        self.regex = regex
+        self.replace_with = replace_with
+
+
 class EventDescription(TypedDict):  # type: ignore
     id_: str
-    source: str
-    type_: str
-    datacontenttype: Optional[str]
-    subject: Optional[str]
+    source: Union[str, ReMatch]
+    type_: Union[str, ReMatch]
+    datacontenttype: Optional[Union[str, ReMatch]]
+    subject: Optional[Union[str, ReMatch]]
     data: Optional[Any]
 
 
@@ -68,51 +78,80 @@ class _Event:
 
     def __repr__(self) -> str:
         s = "Event("
-        if self.source:
-            s += f"Source: {self.source} "
-        if self.type_:
-            s += f"Type_: {self.type_} "
-        if self.datacontenttype:
-            s += f"Datacontenttype: {self.datacontenttype} "
-        if self.subject:
-            s += f"Subject: {self.subject} "
-        if self.data:
-            s += f"Data: {self.data} "
+        for attr in [
+            (self.source, "Source"),
+            (self.type_, "Type"),
+            (self.datacontenttype, "Datacontenttype"),
+            (self.subject, "Subject"),
+            (self.data, "Data"),
+        ]:
+            if isinstance(attr[0], ReMatch):
+                s += f"{attr[1]}: {attr[0].regex} "
+            elif attr[0]:
+                s += f"{attr[1]}: {attr[0]} "
         s += f"Id: {self._id})"
         return s
 
     def assert_matches(self, other: CloudEvent):
-        msg = f"{self} did not match {other}"
-        if self.source:
-            if "*" in self.source:
-                assert fnmatchcase(other["source"], self.source), msg
-            elif "*" in other["source"]:
-                assert fnmatchcase(self.source, other["source"]), msg
-            else:
-                assert self.source == other["source"], msg
-        if self.type_:
-            assert self.type_ == other["type"], msg
-        if self.subject:
-            assert self.subject == other["subject"], msg
+        msg_tmpl = "{self} did not match {other}: {reason}"
+
         if self.data:
-            assert self.data == other.data, msg
-        if self.datacontenttype:
-            assert self.datacontenttype == other["datacontenttype"], msg
+            for k, v in self.data.items():
+                assert k in other.data, msg_tmpl.format(
+                    self=self, other=other, reason=f"{k} not in {other.data}"
+                )
+                if isinstance(v, ReMatch):
+                    assert v.regex.match(other.data[k]), msg_tmpl.format(
+                        self=self, other=other, reason=f"no match for {v} in {k}"
+                    )
+                else:
+                    assert v == other.data[k], msg_tmpl.format(
+                        self=self, other=other, reason=f"{v} != {other.data[k]} for {k}"
+                    )
+
+        for attr in filter(
+            lambda x: x[0] is not None,
+            [
+                (self.source, "source"),
+                (self.type_, "type"),
+                (self.subject, "subject"),
+                (self.datacontenttype, "datacontenttype"),
+            ],
+        ):
+            if isinstance(attr[0], ReMatch):
+                assert attr[0].regex.match(other[attr[1]]), msg_tmpl.format(
+                    self=self,
+                    other=other,
+                    reason=f"no match for {attr[0]} in {attr[1]}",
+                )
+            else:
+                assert attr[0] == other[attr[1]], msg_tmpl.format(
+                    self=self, other=other, reason=f"{attr[0]} != {other[attr[1]]}"
+                )
 
     def to_cloudevent(self) -> CloudEvent:
         attrs = {}
-        if self.source:
-            attrs["source"] = self.source
-        if self.type_:
-            attrs["type"] = self.type_
-        if self.subject:
-            attrs["subject"] = self.subject
-        if self.datacontenttype:
-            attrs["datacontenttype"] = self.datacontenttype
-        return CloudEvent(attrs, self.data)
+        for attr in [
+            (self.source, "source"),
+            (self.type_, "type"),
+            (self.subject, "subject"),
+            (self.datacontenttype, "datacontenttype"),
+        ]:
+            if isinstance(attr[0], ReMatch):
+                attrs[attr[1]] = attr[0].replace_with
+            else:
+                attrs[attr[1]] = attr[0]
+        data = {}
+        if self.data:
+            for k, v in self.data.items():
+                if isinstance(v, ReMatch):
+                    data[k] = v.replace_with
+                else:
+                    data[k] = v
+        return CloudEvent(attrs, data)
 
 
-class _InteractionDefinition:
+class _Interaction:
     def __init__(self, provider_states: Optional[List[Dict[str, Any]]]) -> None:
         self.provider_states: Optional[List[Dict[str, Any]]] = provider_states
         self.scenario: str = ""
@@ -121,25 +160,160 @@ class _InteractionDefinition:
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(Scenario: {self.scenario})"
 
+    def assert_matches(self, event: _Event, other: CloudEvent):
+        event.assert_matches(other)
 
-class _ReceiveDefinition(_InteractionDefinition):
+
+class _RecurringInteraction(_Interaction):
+    def __init__(
+        self, provider_states: Optional[List[Dict[str, Any]]], terminator: _Event
+    ) -> None:
+        super().__init__(provider_states)
+        self.terminator = terminator
+
+    def assert_matches(self, other: CloudEvent):
+        try:
+            self.terminator.assert_matches(other)
+        except AssertionError:
+            pass
+        else:
+            raise _InteractionTermination()
+
+        for ev in self.events:
+            try:
+                ev.assert_matches(other)
+            except AssertionError:
+                continue
+            else:
+                return
+        raise AssertionError(f"No event in {self} matched {other}")
+
+
+class _Request(_Interaction):
     pass
 
 
-class _ResponseDefinition(_InteractionDefinition):
+class _RecurringRequest(_RecurringInteraction):
     pass
 
 
-class _NarrativeMock:
+class _Response(_Interaction):
+    pass
+
+
+class _RecurringResponse(_RecurringInteraction):
+    pass
+
+
+class _InteractionTermination(Exception):
+    pass
+
+
+class _ProviderVerifier:
     def __init__(
         self,
-        interactions: List[_InteractionDefinition],
-        conn_info: _ConnectionInformation,
+        interactions: List[_Interaction],
+        uri: str,
+        unmarshaller: Optional[types.UnmarshallerType],
+        marshaller: Optional[types.MarshallerType],
     ) -> None:
-        self._interactions: List[_InteractionDefinition] = interactions
+        self._interactions: List[_Interaction] = interactions
+        self._uri = uri
+        self._unmarshaller = unmarshaller
+        self._marshaller = marshaller
+
+        # A queue on which errors will be put
+        self._errors: asyncio.Queue = asyncio.Queue()
+
+    def verify(self):
+        self._ws_thread = threading.Thread(target=self._sync_listener)
+        self._ws_thread.start()
+        if asyncio.get_event_loop().is_running():
+            raise RuntimeError(
+                "sync narrative should control the loop, maybe you called it from within an async test?"
+            )
+        self._ws_thread.join()
+        errors = asyncio.get_event_loop().run_until_complete(self._verify())
+        if errors:
+            raise AssertionError(errors)
+
+    async def _mock_listener(self):
+        async with websockets.connect(self._uri) as websocket:
+            for interaction in self._interactions:
+                if type(interaction) == _Interaction:
+                    e = TypeError(
+                        "the first interaction needs to be promoted to either response or receive"
+                    )
+                    self._errors.put_nowait(e)
+                elif isinstance(interaction, _Request):
+                    for event in interaction.events:
+                        await websocket.send(to_json(event.to_cloudevent()))
+                    print("OK", interaction.scenario)
+                elif isinstance(interaction, _Response):
+                    for event in interaction.events:
+                        received_event = await websocket.recv()
+                        try:
+                            interaction.assert_matches(
+                                event,
+                                from_json(
+                                    received_event, data_unmarshaller=self._unmarshaller
+                                ),
+                            )
+                        except AssertionError as e:
+                            self._errors.put_nowait(e)
+                    print("OK", interaction.scenario)
+                elif isinstance(interaction, _RecurringResponse):
+                    while True:
+                        received_event = await websocket.recv()
+                        try:
+                            interaction.assert_matches(
+                                from_json(
+                                    received_event, data_unmarshaller=self._unmarshaller
+                                )
+                            )
+                        except _InteractionTermination:
+                            break
+                        except AssertionError as e:
+                            self._errors.put_nowait(e)
+                            break
+                    print("OK", interaction.scenario)
+                elif isinstance(interaction, _RecurringRequest):
+                    raise TypeError("don't know how to request recurringly")
+                else:
+                    e = TypeError(
+                        f"expected either receive or response, got {interaction}"
+                    )
+                    self._errors.put_nowait(e)
+
+    def _sync_listener(self):
+        self._loop = asyncio.new_event_loop()
+        self._loop.run_until_complete(self._mock_listener())
+        self._loop.close()
+
+    async def _verify(self):
+        errors: List[Exception] = []
+        while True:
+            try:
+                errors.append(self._errors.get_nowait())
+            except QueueEmpty:
+                break
+        return errors
+
+
+class _ProviderMock:
+    def __init__(
+        self,
+        interactions: List[_Interaction],
+        conn_info: _ConnectionInformation,
+        unmarshaller: Optional[types.UnmarshallerType],
+        marshaller: Optional[types.MarshallerType],
+    ) -> None:
+        self._interactions: List[_Interaction] = interactions
         self._loop: Optional[AbstractEventLoop] = None
         self._ws: Optional[WebSocketServer] = None
         self._conn_info = conn_info
+        self._unmarshaller = unmarshaller
+        self._marshaller = marshaller
 
         # A queue on which errors will be put
         self._errors: asyncio.Queue = asyncio.Queue()
@@ -156,28 +330,58 @@ class _NarrativeMock:
     def port(self) -> str:
         return self._conn_info["port"]
 
-    async def _ws_handler(self, websocket, path):
+    async def _mock_handler(self, websocket, path):
         expected_path = self._conn_info["path"]
         if path != expected_path:
             print(f"not handling {path} as it is not the expected path {expected_path}")
             return
-        for interaction in reversed(self._interactions):
-            if type(interaction) == _InteractionDefinition:
+        for interaction in self._interactions:
+            if type(interaction) == _Interaction:
                 e = TypeError(
                     "the first interaction needs to be promoted to either response or receive"
                 )
                 self._errors.put_nowait(e)
-            elif isinstance(interaction, _ReceiveDefinition):
+            elif isinstance(interaction, _Request):
                 for event in interaction.events:
                     received_event = await websocket.recv()
                     try:
-                        event.assert_matches(from_json(received_event))
+                        interaction.assert_matches(
+                            event,
+                            from_json(
+                                received_event, data_unmarshaller=self._unmarshaller
+                            ),
+                        )
                     except AssertionError as e:
                         self._errors.put_nowait(e)
                 print("OK", interaction.scenario)
-            elif isinstance(interaction, _ResponseDefinition):
+            elif isinstance(interaction, _Response):
                 for event in interaction.events:
-                    await websocket.send(to_json(event.to_cloudevent()))
+                    await websocket.send(
+                        to_json(event.to_cloudevent(), data_marshaller=self._marshaller)
+                    )
+                print("OK", interaction.scenario)
+            elif isinstance(interaction, _RecurringResponse):
+                for event in interaction.events:
+                    await websocket.send(
+                        to_json(event.to_cloudevent(), data_marshaller=self._marshaller)
+                    )
+                await websocket.send(
+                    to_json(
+                        interaction.terminator.to_cloudevent(),
+                        data_marshaller=self._marshaller,
+                    )
+                )
+                print("OK", interaction.scenario)
+            elif isinstance(interaction, _RecurringRequest):
+                while True:
+                    received_event = await websocket.recv()
+                    try:
+                        interaction.assert_matches(received_event)
+                    except _InteractionTermination:
+                        break
+                    except AssertionError as e:
+                        self._errors.put_nowait(e)
+                        break
                 print("OK", interaction.scenario)
             else:
                 e = TypeError(f"expected either receive or response, got {interaction}")
@@ -190,7 +394,7 @@ class _NarrativeMock:
         async def _serve():
             await asyncio.sleep(delay_startup)
             ws = await websockets.serve(
-                self._ws_handler, self._conn_info["hostname"], self._conn_info["port"]
+                self._mock_handler, self._conn_info["hostname"], self._conn_info["port"]
             )
             await self._done
             ws.close()
@@ -229,7 +433,7 @@ class _NarrativeMock:
 
     async def __aenter__(self):
         self._ws = await websockets.serve(
-            self._ws_handler, self._conn_info["hostname"], self._conn_info["port"]
+            self._mock_handler, self._conn_info["hostname"], self._conn_info["port"]
         )
         return self
 
@@ -245,53 +449,93 @@ class _Narrative:
     def __init__(self, consumer: "Consumer", provider: "Provider") -> None:
         self.consumer = consumer
         self.provider = provider
-        self.interactions: List[_InteractionDefinition] = []
-        self._mock: Optional[_NarrativeMock] = None
+        self.interactions: List[_Interaction] = []
+        self._mock: Optional[_ProviderMock] = None
         self._conn_info: Optional[_ConnectionInformation] = None
+        self._unmarshaller: Optional[types.UnmarshallerType] = None
+        self._marshaller: Optional[types.MarshallerType] = None
 
     def given(self, provider_state: Optional[str], **params) -> "_Narrative":
         state = None
         if provider_state:
             state = [{"name": provider_state, "params": params}]
-        self.interactions.insert(0, _InteractionDefinition(state))
+        self.interactions.append(_Interaction(state))
         return self
 
     def and_given(self, provider_state: str, **params) -> "_Narrative":
         raise NotImplementedError("not yet implemented")
 
     def receives(self, scenario: str) -> "_Narrative":
-        def_ = self.interactions[-1]
-        if type(def_) == _InteractionDefinition:
-            def_.__class__ = _ReceiveDefinition
-        elif isinstance(def_, _ResponseDefinition) and not def_.events:
+        interaction = self.interactions[-1]
+        if type(interaction) == _Interaction:
+            interaction.__class__ = _Request
+        elif not interaction.events:
             raise ValueError("receive followed an empty response scenario")
         else:
-            def_ = _ReceiveDefinition(self.interactions[-1].provider_states)
-            self.interactions.insert(0, def_)
-        def_.scenario = scenario
+            interaction = _Request(self.interactions[-1].provider_states)
+            self.interactions.append(interaction)
+        interaction.scenario = scenario
         return self
 
     def responds_with(self, scenario: str) -> "_Narrative":
-        def_ = self.interactions[-1]
-        if type(def_) == _InteractionDefinition:
-            def_.__class__ = _ResponseDefinition
-        elif isinstance(def_, _ReceiveDefinition) and not def_.events:
-            raise ValueError("response followed an empty receive scenario")
+        interaction = self.interactions[-1]
+        if type(interaction) == _Interaction:
+            interaction.__class__ = _Response
+        elif (
+            isinstance(interaction, (_Request, _RecurringRequest))
+            and not interaction.events
+        ):
+            raise ValueError("response followed an empty request scenario")
         else:
-            def_ = _ResponseDefinition(self.interactions[-1].provider_states)
-            self.interactions.insert(0, def_)
-        def_.scenario = scenario
+            interaction = _Response(self.interactions[-1].provider_states)
+            self.interactions.append(interaction)
+        interaction.scenario = scenario
         return self
 
     def cloudevents_in_order(self, events: List[EventDescription]) -> "_Narrative":
         cloudevents = []
         for event in events:
             cloudevents.append(_Event(event))
-        self.interactions[0].events = cloudevents
+        self.interactions[-1].events = cloudevents
+        return self
+
+    def repeating_unordered_events(
+        self, events: List[EventDescription], terminator=EventDescription
+    ) -> "_Narrative":
+        events_list = []
+        for event in events:
+            events_list.append(_Event(event))
+        interaction = self.interactions[-1]
+        if type(interaction) == _Response:
+            self.interactions[-1] = _RecurringResponse(
+                interaction.provider_states, _Event(terminator)
+            )
+        elif isinstance(interaction, _Request):
+            self.interactions[-1] = _RecurringRequest(
+                interaction.provider_states, _Event(terminator)
+            )
+        elif isinstance(
+            interaction, (_RecurringRequest, _RecurringResponse, _RecurringInteraction)
+        ):
+            raise TypeError(
+                f"interaction {interaction} already recurring, define new interaction"
+            )
+        else:
+            raise ValueError(f"cannot promote {interaction}")
+        self.interactions[-1].events = events_list
+        self.interactions[-1].scenario = interaction.scenario
         return self
 
     def on_uri(self, uri: str) -> "_Narrative":
         self._conn_info = _ConnectionInformation.from_uri(uri)
+        return self
+
+    def with_unmarshaller(self, data_unmarshaller: types.UnmarshallerType):
+        self._unmarshaller = data_unmarshaller
+        return self
+
+    def with_marshaller(self, data_marshaller: types.MarshallerType):
+        self._marshaller = data_marshaller
         return self
 
     @property
@@ -300,23 +544,39 @@ class _Narrative:
             raise ValueError("no connection information")
         return self._conn_info.get("uri")
 
+    def _reset(self):
+        self._conn_info = None
+        self._unmarshaller = None
+        self._marshaller = None
+
     def __enter__(self):
         if not self._conn_info:
             raise ValueError("no connection info on mock")
-        self._mock = _NarrativeMock(self.interactions, self._conn_info)
+        self._mock = _ProviderMock(
+            self.interactions, self._conn_info, self._unmarshaller, self._marshaller
+        )
         return self._mock.__enter__()
 
     def __exit__(self, *args, **kwargs):
         self._mock.__exit__(*args, **kwargs)
+        self._reset()
 
     async def __aenter__(self):
         if not self._conn_info:
             raise ValueError("no connection info on mock")
-        self._mock = _NarrativeMock(self.interactions, self._conn_info)
+        self._mock = _ProviderMock(
+            self.interactions, self._conn_info, self._unmarshaller, self._marshaller
+        )
         return await self._mock.__aenter__()
 
     async def __aexit__(self, *args):
         await self._mock.__aexit__(*args)
+        self._reset()
+
+    def verify(self, provider_uri) -> _ProviderVerifier:
+        _ProviderVerifier(
+            self.interactions, provider_uri, self._unmarshaller, self._marshaller
+        ).verify()
 
 
 class _Actor:

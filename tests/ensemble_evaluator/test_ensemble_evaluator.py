@@ -5,6 +5,7 @@ import pytest
 import asyncio
 import threading
 import queue
+import time
 
 from ert_shared.ensemble_evaluator.client import Client
 from ert_shared.ensemble_evaluator.entity import serialization
@@ -25,6 +26,7 @@ import ert_shared.ensemble_evaluator.entity.identifiers as identifiers
 from ert_shared.ensemble_evaluator.entity.snapshot import Snapshot
 from tests.ensemble_evaluator.ensemble_test import TestEnsemble, send_dispatch_event
 from tests.narrative import EventDescription
+from tests.narratives import monitor_happy_path_narrative
 
 
 @pytest.fixture
@@ -57,8 +59,11 @@ def test_dispatchers_can_connect_and_monitor_can_shut_down_evaluator(evaluator):
         assert snapshot.get_status() == ENSEMBLE_STATE_STARTED
         # two dispatchers connect
 
-        with Client(url + "/dispatch", max_retries=1, timeout_multiplier=1) as dispatch1, \
-                Client(url + "/dispatch", max_retries=1, timeout_multiplier=1) as dispatch2:
+        with Client(
+            url + "/dispatch", max_retries=1, timeout_multiplier=1
+        ) as dispatch1, Client(
+            url + "/dispatch", max_retries=1, timeout_multiplier=1
+        ) as dispatch2:
 
             # first dispatcher informs that job 0 is running
             send_dispatch_event(
@@ -275,6 +280,30 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config):
             ):
                 monitor.signal_done()
 
+    ensemble.join()
+
+
+def test_verify_narratives(ee_config, caplog):
+    ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
+    ensemble.addFailJob(real=1, step=0, job=1)
+    ee = EnsembleEvaluator(
+        ensemble,
+        ee_config,
+        0,
+        ee_id="ee-0",
+    )
+    ee.run()
+
+    def start_ensemble():
+        time.sleep(0.5)  # FIXME
+        ensemble.start()
+
+    threading.Thread(target=start_ensemble).run()
+    monitor_happy_path_narrative.with_marshaller(
+        serialization.evaluator_marshaller
+    ).with_unmarshaller(serialization.evaluator_unmarshaller).verify(
+        ee_config.client_uri
+    )
     ensemble.join()
 
 

@@ -12,6 +12,7 @@ def test_consume(unused_tcp_port):
         [
             ids.EVTYPE_EE_SNAPSHOT,
             ids.EVTYPE_EE_SNAPSHOT_UPDATE,
+            ids.EVTYPE_EE_SNAPSHOT_UPDATE,
             ids.EVTYPE_EE_TERMINATED,
         ]
     )

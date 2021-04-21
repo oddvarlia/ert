@@ -129,7 +129,7 @@ class TestEnsemble(_Ensemble):
     def evaluate(self, config, ee_id):
         self._eval_thread = threading.Thread(
             target=self._evaluate,
-            args=(config.url, ee_id),
+            args=(config.dispatch_uri, ee_id),
         )
 
     def start(self):
