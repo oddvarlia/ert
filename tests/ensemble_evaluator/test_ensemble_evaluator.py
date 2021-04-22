@@ -1,3 +1,4 @@
+import re
 from contextlib import contextmanager
 
 import websockets
@@ -25,7 +26,19 @@ from ert_shared.ensemble_evaluator.config import EvaluatorServerConfig
 import ert_shared.ensemble_evaluator.entity.identifiers as identifiers
 from ert_shared.ensemble_evaluator.entity.snapshot import Snapshot
 from tests.ensemble_evaluator.ensemble_test import TestEnsemble, send_dispatch_event
-from tests.narrative import EventDescription, Consumer, Provider, _Narrative, _Response, _Request
+from tests.narrative import (
+    EventDescription,
+    Consumer,
+    Provider,
+    _Narrative,
+    _Response,
+    _Request,
+    _Interaction,
+    _InteractionTermination,
+    _RecurringResponse,
+    _RecurringRequest,
+    ReMatch,
+)
 from tests.narratives import monitor_happy_path_narrative
 
 
@@ -132,11 +145,13 @@ def test_dispatchers_can_connect_and_monitor_can_shut_down_evaluator(evaluator):
 
 
 class Dialogue(object):
-
-    def __init__(self, narrative: _Narrative):
+    def __init__(
+        self, narrative: _Narrative, unmarshaller=serialization.evaluator_unmarshaller
+    ):
         self.narrative = narrative
         self.currentInteraction = narrative.interactions.pop()
         self.error = None
+        self._unmarshaller = unmarshaller
 
     async def verify_event(self, ce, type):
         if not self.currentInteraction.events:
@@ -149,7 +164,9 @@ class Dialogue(object):
         else:
             # repeating
 
-            if isinstance(self.narrative.interactions[-1], type) and self.narrative.interactions[-1].events[0].matches(ce):
+            if isinstance(
+                self.narrative.interactions[-1], type
+            ) and self.narrative.interactions[-1].events[0].matches(ce):
                 self.currentInteraction = self.narrative.interactions.pop()
 
             if isinstance(self.currentInteraction, type):
@@ -164,62 +181,101 @@ class Dialogue(object):
                 if not event.repeating:
                     self.currentInteraction.events.pop(0)
 
-
     async def _async_proxy(self, url, q):
         self.done = asyncio.get_event_loop().create_future()
 
-        async def handle_server(server, client):
+        async def handle_messages(msg_q: asyncio.Queue, done: asyncio.Future):
             try:
-                async for msg in server:
-                    print("FROM SERVER:")
-                    print(msg)
-                    print()
-                    ce = from_json(
-                        msg, data_unmarshaller=serialization.evaluator_unmarshaller
-                    )
-                    try:
-                        await self.verify_event(ce, _Response)
-                    except AssertionError as e:
-                        self.done.set_result(e)
-                        await client.close()
-                        raise e
+                for interaction in self.narrative.interactions:
 
-                    await client.send(msg)
+                    print(f"Awaiting {interaction.__class__}")
+                    if type(interaction) == _Interaction:
+                        e = TypeError(
+                            "the first interaction needs to be promoted to either response or receive"
+                        )
+                        await done.set_result(e)
+                        return
+                    elif isinstance(interaction, _Request):
+                        for event in interaction.events:
+                            source, msg = await msg_q.get()
+                            assert source == "client"
+
+                            interaction.assert_matches(
+                                event,
+                                from_json(msg, data_unmarshaller=self._unmarshaller),
+                            )
+                        print("OK", interaction.scenario)
+                    elif isinstance(interaction, _Response):
+                        for event in interaction.events:
+                            source, msg = await msg_q.get()
+                            assert source == "server"
+
+                            interaction.assert_matches(
+                                event,
+                                from_json(msg, data_unmarshaller=self._unmarshaller),
+                            )
+                        print("OK", interaction.scenario)
+                    elif isinstance(interaction, _RecurringResponse):
+                        while True:
+                            source, msg = await msg_q.get()
+                            assert source == "server"
+                            try:
+                                interaction.assert_matches(
+                                    from_json(msg, data_unmarshaller=self._unmarshaller)
+                                )
+                            except _InteractionTermination:
+                                break
+                        print("OK", interaction.scenario)
+                    elif isinstance(interaction, _RecurringRequest):
+                        while True:
+                            source, msg = await msg_q.get()
+                            assert source == "client"
+                            try:
+                                interaction.assert_matches(
+                                    from_json(msg, data_unmarshaller=self._unmarshaller)
+                                )
+                            except _InteractionTermination:
+                                break
+                        print("OK", interaction.scenario)
+                    else:
+                        e = TypeError(
+                            f"expected either receive or response, got {interaction}"
+                        )
+                        await done.set_result(e)
+                    print(f"done waiting")
             except Exception as e:
-                raise e
+                await done.set_result(e)
+
+        async def handle_server(server, client, msg_q):
+            async for msg in server:
+                await msg_q.put(("server", msg))
+                print(f"from server: {msg}")
+                await client.send(msg)
 
         async def handle_client(client, _path):
-            try:
-                if _path == "/client":
-                    async with websockets.connect(url + _path) as server:
-                        server_task = asyncio.create_task(handle_server(server, client))
+            msg_q = asyncio.Queue()
+            if _path == "/client":
+                async with websockets.connect(url + _path) as server:
+                    msg_task = asyncio.create_task(handle_messages(msg_q, self.done))
+                    server_task = asyncio.create_task(
+                        handle_server(server, client, msg_q)
+                    )
 
-                        async for msg in client:
-                            print("FROM CLIENT:")
-                            print(msg)
-                            print()
-                            ce = from_json(
-                                msg, data_unmarshaller=serialization.evaluator_unmarshaller
-                            )
-                            try:
-                                await self.verify_event(ce, _Request)
-                            except Exception as e:
-                                self.done.set_result(e)
-                                await server.close()
-                                raise e
+                    async for msg in client:
+                        print(f"from client: {msg}")
+                        await msg_q.put(("client", msg))
+                        await server.send(msg)
 
-                            await server.send(msg)
-            except Exception as e:
-                print(e)
-                raise
-            finally:
-                print("finally")
+                    server_task.cancel()
+                    await server_task
+                    await msg_task
 
         async with websockets.serve(handle_client, host="localhost", port=0) as s:
             port = s.sockets[0].getsockname()[1]
             asyncio.get_event_loop().run_in_executor(None, lambda: q.put(port))
             asyncio.get_event_loop().run_in_executor(None, lambda: q.put(self.done))
             error = await self.done
+            print(f"Done. Error: {error}")
             q.put(error)
 
     def _proxy(self, url, q):
@@ -227,7 +283,6 @@ class Dialogue(object):
         q.put(asyncio.get_event_loop())
         asyncio.get_event_loop().run_until_complete(self._async_proxy(url, q))
         print("her")
-
 
     @contextmanager
     def proxy(self, url):
@@ -243,7 +298,7 @@ class Dialogue(object):
         t.join()
         error = q.get()
         if error:
-            raise AssertionError('Sum thing wong') from error
+            raise AssertionError("Sum thing wong") from error
 
 
 def test_ensemble_monitor_communication_given_success(ee_config, unused_tcp_port):
@@ -256,19 +311,53 @@ def test_ensemble_monitor_communication_given_success(ee_config, unused_tcp_port
     )
     narrative = (
         Consumer("Monitor")
-            .forms_narrative_with(Provider("Evaluator"))
-            .given("Successful Ensemble with 2 reals, with 2 steps each, with 2 jobs each")
-            .responds_with("Snapshot")
-            .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT, source="*")])
-            .responds_with("Some amount of Snapshot updates")
-            .cloudevents_repeating(EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE, source="*"))
-            .receives("Monitor done")
-            .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE, source="*")])
-            # .receives("Kødd")
-            # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE, source="Frode")])
-            .responds_with("Termination")
-            .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_TERMINATED, source="*")])
-            .on_uri(f"ws://localhost:{unused_tcp_port}")
+        .forms_narrative_with(Provider("Evaluator"))
+        .given("Successful Ensemble with 2 reals, with 2 steps each, with 2 jobs each")
+        .responds_with("Snapshot")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_SNAPSHOT,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ]
+        )
+        .responds_with("Some amount of Snapshot updates")
+        .repeating_unordered_events(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ],
+            terminator=EventDescription(
+                type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                source=ReMatch(re.compile(".*"), ""),
+                data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED},
+            ),
+        )
+        .receives("Monitor done")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_USER_DONE,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ]
+        )
+        # .receives("Kødd")
+        # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE, source="Frode")])
+        .responds_with("Termination")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_TERMINATED,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ]
+        )
+        .on_uri(f"ws://localhost:{unused_tcp_port}")
+        .with_unmarshaller(serialization.evaluator_unmarshaller)
     )
 
     ee.run()
@@ -289,23 +378,80 @@ def test_ensemble_monitor_communication_given_success(ee_config, unused_tcp_port
 def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_port):
     narrative = (
         Consumer("Monitor")
-            .forms_narrative_with(Provider("Evaluator"))
-            .given("Ensemble with 2 reals, with 2 steps each, with 2 jobs each, job 1 in real 1 fails")
-            .responds_with("Snapshot")
-            .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT, source="*")])
-            .responds_with("Some amount of Snapshot updates")
-            .cloudevents_repeating(EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE, source="*"))
-            # .responds_with("One update of failing job")
-            # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE, source="*")])
-            # .responds_with("Some amount of Snapshot updates")
-            # .cloudevents_repeating(EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE, source="*"))
-            .receives("Monitor done")
-            .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE, source="*")])
-            # .receives("Kødd")
-            # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE, source="Frode")])
-            .responds_with("Termination")
-            .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_TERMINATED, source="*")])
-            .on_uri(f"ws://localhost:{unused_tcp_port}")
+        .forms_narrative_with(Provider("Evaluator"))
+        .given(
+            "Ensemble with 2 reals, with 2 steps each, with 2 jobs each, job 1 in real 1 fails"
+        )
+        .responds_with("Snapshot")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_SNAPSHOT,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ]
+        )
+        .responds_with("Some amount of Snapshot updates, until job fails")
+        .repeating_unordered_events(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ],
+            terminator=EventDescription(
+                type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                source=ReMatch(re.compile(".*"), ""),
+                data={
+                    "reals": {
+                        "1": {"steps": {"0": {"jobs": {"1": {"status": "Failed"}}}}}
+                    }
+                },
+            ),
+        )
+        .responds_with("Realization has failed")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                    source=ReMatch(re.compile(".*"), ""),
+                    data={"reals": {"1": {"status": "Failed"}}},
+                )
+            ]
+        )
+        .responds_with("Some amount of Snapshot updates")
+        .repeating_unordered_events(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ],
+            terminator=EventDescription(
+                type_=identifiers.EVTYPE_EE_SNAPSHOT_UPDATE,
+                source=ReMatch(re.compile(".*"), ""),
+                data={identifiers.STATUS: ENSEMBLE_STATE_STOPPED},
+            ),
+        )
+        .receives("Monitor done")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_USER_DONE,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ]
+        )
+        .responds_with("Termination")
+        .cloudevents_in_order(
+            [
+                EventDescription(
+                    type_=identifiers.EVTYPE_EE_TERMINATED,
+                    source=ReMatch(re.compile(".*"), ""),
+                )
+            ]
+        )
+        .on_uri(f"ws://localhost:{unused_tcp_port}")
     )
     ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
     ensemble.addFailJob(real=1, step=0, job=1)
@@ -343,16 +489,38 @@ def test_verify_narratives(ee_config, caplog):
     )
     ee.run()
 
-    def start_ensemble():
-        time.sleep(0.5)  # FIXME
-        ensemble.start()
-
-    threading.Thread(target=start_ensemble).run()
     monitor_happy_path_narrative.with_marshaller(
         serialization.evaluator_marshaller
     ).with_unmarshaller(serialization.evaluator_unmarshaller).verify(
-        ee_config.client_uri
+        ee_config.client_uri, on_connect=ensemble.start
     )
+    ensemble.join()
+
+
+def test_verify_narratives2(ee_config, caplog):
+    ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
+    ensemble.addFailJob(real=1, step=0, job=1)
+    ee = EnsembleEvaluator(
+        ensemble,
+        ee_config,
+        0,
+        ee_id="ee-0",
+    )
+
+    with ee.run() as m:
+        pass
+    with Dialogue(monitor_happy_path_narrative).proxy(ee_config.url) as port:
+        with ee_monitor.create("localhost", port) as monitor:
+            for event in monitor.track():
+                print(f"monitor received: {event}")
+                if event["type"] == identifiers.EVTYPE_EE_SNAPSHOT:
+                    ensemble.start()
+                if (
+                    event.data
+                    and event.data.get(identifiers.STATUS) == ENSEMBLE_STATE_STOPPED
+                ):
+                    monitor.signal_done()
+
     ensemble.join()
 
 

@@ -68,14 +68,13 @@ class EventDescription(TypedDict):  # type: ignore
 
 
 class _Event:
-    def __init__(self, description: EventDescription, repeating=False) -> None:
+    def __init__(self, description: EventDescription) -> None:
         self._id = description.get("id_", uuid.uuid4())
         self.source = description["source"]
         self.type_ = description["type_"]
         self.datacontenttype = description.get("datacontenttype")
         self.subject = description.get("subject")
         self.data = description.get("data")
-        self.repeating = repeating
 
     def __repr__(self) -> str:
         s = "Event("
@@ -85,7 +84,6 @@ class _Event:
             (self.datacontenttype, "Datacontenttype"),
             (self.subject, "Subject"),
             (self.data, "Data"),
-            (self.repeating, "Repeating"),
         ]:
             if isinstance(attr[0], ReMatch):
                 s += f"{attr[1]}: {attr[0].regex} "
@@ -94,22 +92,35 @@ class _Event:
         s += f"Id: {self._id})"
         return s
 
+    def dict_match(self, original, match):
+        for k, v in match.items():
+            assert k in original
+            if isinstance(v, dict):
+                assert isinstance(original[k], dict)
+                self.dict_match(original[k], v)
+            elif isinstance(v, ReMatch):
+                assert isinstance(original[k], str)
+                assert v.regex.match(original[k])
+            else:
+                assert original[k] == v
+
     def assert_matches(self, other: CloudEvent):
         msg_tmpl = "{self} did not match {other}: {reason}"
 
         if self.data:
-            for k, v in self.data.items():
-                assert k in other.data, msg_tmpl.format(
-                    self=self, other=other, reason=f"{k} not in {other.data}"
-                )
-                if isinstance(v, ReMatch):
-                    assert v.regex.match(other.data[k]), msg_tmpl.format(
-                        self=self, other=other, reason=f"no match for {v} in {k}"
-                    )
-                else:
-                    assert v == other.data[k], msg_tmpl.format(
-                        self=self, other=other, reason=f"{v} != {other.data[k]} for {k}"
-                    )
+            self.dict_match(other.data, self.data)
+            # for k, v in self.data.items():
+            #     assert k in other.data, msg_tmpl.format(
+            #         self=self, other=other, reason=f"{k} not in {other.data}"
+            #     )
+            #     if isinstance(v, ReMatch):
+            #         assert v.regex.match(other.data[k]), msg_tmpl.format(
+            #             self=self, other=other, reason=f"no match for {v} in {k}"
+            #         )
+            #     else:
+            #         assert v == other.data[k], msg_tmpl.format(
+            #             self=self, other=other, reason=f"{v} != {other.data[k]} for {k}"
+            #         )
 
         for attr in filter(
             lambda x: x[0] is not None,
@@ -227,8 +238,10 @@ class _ProviderVerifier:
         # A queue on which errors will be put
         self._errors: asyncio.Queue = asyncio.Queue()
 
-    def verify(self):
-        self._ws_thread = threading.Thread(target=self._sync_listener)
+    def verify(self, on_connect):
+        self._ws_thread = threading.Thread(
+            target=self._sync_listener, args=[on_connect]
+        )
         self._ws_thread.start()
         if asyncio.get_event_loop().is_running():
             raise RuntimeError(
@@ -239,8 +252,9 @@ class _ProviderVerifier:
         if errors:
             raise AssertionError(errors)
 
-    async def _mock_listener(self):
+    async def _mock_listener(self, on_connect):
         async with websockets.connect(self._uri) as websocket:
+            on_connect()
             for interaction in self._interactions:
                 if type(interaction) == _Interaction:
                     e = TypeError(
@@ -287,9 +301,9 @@ class _ProviderVerifier:
                     )
                     self._errors.put_nowait(e)
 
-    def _sync_listener(self):
+    def _sync_listener(self, on_connect):
         self._loop = asyncio.new_event_loop()
-        self._loop.run_until_complete(self._mock_listener())
+        self._loop.run_until_complete(self._mock_listener(on_connect))
         self._loop.close()
 
     async def _verify(self):
@@ -528,11 +542,6 @@ class _Narrative:
         self.interactions[-1].scenario = interaction.scenario
         return self
 
-    def cloudevents_repeating(self, event: EventDescription) -> "_Narrative":
-        self.interactions[0].events = [_Event(event, repeating=True)]
-        return self
-
-
     def on_uri(self, uri: str) -> "_Narrative":
         self._conn_info = _ConnectionInformation.from_uri(uri)
         return self
@@ -580,10 +589,10 @@ class _Narrative:
         await self._mock.__aexit__(*args)
         self._reset()
 
-    def verify(self, provider_uri) -> _ProviderVerifier:
+    def verify(self, provider_uri, on_connect) -> _ProviderVerifier:
         _ProviderVerifier(
             self.interactions, provider_uri, self._unmarshaller, self._marshaller
-        ).verify()
+        ).verify(on_connect)
 
 
 class _Actor:
