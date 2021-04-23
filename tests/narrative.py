@@ -4,7 +4,7 @@ from asyncio.queues import QueueEmpty
 from datetime import date
 from enum import Enum, auto
 import re
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import uuid
 import threading
 
@@ -155,12 +155,14 @@ class _Event:
             else:
                 attrs[attr[1]] = attr[0]
         data = {}
-        if self.data:
+        if isinstance(self.data, dict):
             for k, v in self.data.items():
                 if isinstance(v, ReMatch):
                     data[k] = v.replace_with
                 else:
                     data[k] = v
+        elif isinstance(self.data, bytes):
+            data = self.data
         return CloudEvent(attrs, data)
 
 

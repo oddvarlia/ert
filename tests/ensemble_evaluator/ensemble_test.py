@@ -8,8 +8,10 @@ from ert_shared.ensemble_evaluator.entity.ensemble import _Realization, _Step, _
 from ert_shared.ensemble_evaluator.entity.ensemble_base import _Ensemble
 
 
-def send_dispatch_event(client, event_type, source, event_id, data):
-    event1 = CloudEvent({"type": event_type, "source": source, "id": event_id}, data)
+def send_dispatch_event(client, event_type, source, event_id, data, **extra_attrs):
+    event1 = CloudEvent(
+        {"type": event_type, "source": source, "id": event_id, **extra_attrs}, data
+    )
     client.send(to_json(event1))
 
 
@@ -20,6 +22,7 @@ class TestEnsemble(_Ensemble):
         self.steps = steps
         self.jobs = jobs
         self.fail_jobs = []
+        self.result = None
 
         the_reals = [
             _Realization(
@@ -115,12 +118,17 @@ class TestEnsemble(_Ensemble):
                         )
                         event_id = event_id + 1
 
+            data = self.result if self.result else None
+            extra_attrs = {}
+            if self.result_datacontenttype:
+                extra_attrs["datacontenttype"] = self.result_datacontenttype
             send_dispatch_event(
                 dispatch,
                 identifiers.EVTYPE_ENSEMBLE_STOPPED,
                 f"/ert/ee/{ee_id}",
                 f"event-{event_id}",
-                None,
+                data,
+                **extra_attrs,
             )
 
     def join(self):
@@ -130,7 +138,7 @@ class TestEnsemble(_Ensemble):
         self._eval_thread = threading.Thread(
             target=self._evaluate,
             args=(config.dispatch_uri, ee_id),
-            name = "TestEnseble",
+            name="TestEnseble",
         )
 
     def start(self):
@@ -141,3 +149,7 @@ class TestEnsemble(_Ensemble):
 
     def addFailJob(self, real, step, job):
         self.fail_jobs.append((real, 0, step, job))
+
+    def with_result(self, result, datacontenttype):
+        self.result = result
+        self.result_datacontenttype = datacontenttype

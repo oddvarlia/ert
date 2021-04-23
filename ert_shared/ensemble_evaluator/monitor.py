@@ -45,7 +45,9 @@ class _Monitor:
                 message = from_json(result, lambda x: pickle.loads(x))
                 return message.data
 
-        return asyncio.run_coroutine_threadsafe(_send(), self._loop).result()
+        if self._loop.is_running():
+            return asyncio.run_coroutine_threadsafe(_send(), self._loop).result()
+        return self._loop.run_until_complete(_send())
 
     def _send_event(self, cloud_event):
         message = to_json(
