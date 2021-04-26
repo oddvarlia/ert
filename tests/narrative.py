@@ -1,7 +1,6 @@
 import asyncio
 from asyncio.events import AbstractEventLoop
 from asyncio.queues import QueueEmpty
-from datetime import date
 from enum import Enum, auto
 import json
 import re
@@ -12,8 +11,6 @@ import threading
 from cloudevents.sdk import types
 from ert_shared.ensemble_evaluator.ws_util import wait
 from websockets.server import WebSocketServer
-
-from fnmatch import fnmatchcase
 
 try:
     from typing import TypedDict  # >=3.8
@@ -133,7 +130,7 @@ class _Event:
         for attr in [
             (self.source, "Source"),
             (self.type_, "Type"),
-            (self.datacontenttype, "Datacontenttype"),
+            (self.datacontenttype, "DataContentType"),
             (self.subject, "Subject"),
             (self.data, "Data"),
         ]:
@@ -231,11 +228,16 @@ class InteractionDirection(Enum):
 
 
 class _Interaction:
-    def __init__(self, provider_states: Optional[List[Dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        provider_states: Optional[List[Dict[str, Any]]],
+        ce_serializer: _CloudEventSerializer,
+    ) -> None:
         self.provider_states: Optional[List[Dict[str, Any]]] = provider_states
         self.scenario: str = ""
         self.events: List[_Event] = []
         self.direction = None
+        self.ce_serializer = ce_serializer
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(Scenario: {self.scenario})"
@@ -243,22 +245,22 @@ class _Interaction:
     def assert_matches(self, event: _Event, other: CloudEvent):
         event.assert_matches(other)
 
-    async def verify(self, msg_q, data_unmarshaller=None):
+    async def verify(self, msg_q):
         for event in self.events:
             source, msg = await msg_q.get()
             assert source.represents(self), f"Wrong direction for {self}"
-            self.assert_matches(
-                event,
-                from_json(msg, data_unmarshaller=data_unmarshaller),
-            )
+            self.assert_matches(event, self.ce_serializer.from_json(msg))
         print("OK", self.scenario)
 
 
 class _RecurringInteraction(_Interaction):
     def __init__(
-        self, provider_states: Optional[List[Dict[str, Any]]], terminator: _Event
+        self,
+        provider_states: Optional[List[Dict[str, Any]]],
+        terminator: _Event,
+        ce_serializer: _CloudEventSerializer,
     ) -> None:
-        super().__init__(provider_states)
+        super().__init__(provider_states, ce_serializer)
         self.terminator = terminator
 
     def assert_matches(self, other: CloudEvent):
@@ -282,14 +284,12 @@ class _RecurringInteraction(_Interaction):
             f"No event in {self}\n matched {other}.\nDid not match terminator because: {terminator_error}"
         )
 
-    async def verify(self, msg_q, data_unmarshaller=None):
+    async def verify(self, msg_q):
         while True:
             source, msg = await msg_q.get()
             assert source.represents(self), f"Wrong direction for {self}"
             try:
-                self.assert_matches(
-                    from_json(msg, data_unmarshaller=data_unmarshaller),
-                )
+                self.assert_matches(self.ce_serializer.from_json(msg))
             except _InteractionTermination:
                 break
         print("OK", self.scenario)
@@ -560,7 +560,7 @@ class _Narrative:
         state = None
         if provider_state:
             state = [{"name": provider_state, "params": params}]
-        self.interactions.append(_Interaction(state))
+        self.interactions.append(_Interaction(state, self._ce_serializer))
         return self
 
     def and_given(self, provider_state: str, **params) -> "_Narrative":
@@ -573,7 +573,9 @@ class _Narrative:
         elif not interaction.events:
             raise ValueError("receive followed an empty response scenario")
         else:
-            interaction = _Request(self.interactions[-1].provider_states)
+            interaction = _Request(
+                self.interactions[-1].provider_states, self._ce_serializer
+            )
             self.interactions.append(interaction)
         interaction.scenario = scenario
         return self
@@ -588,7 +590,9 @@ class _Narrative:
         ):
             raise ValueError("response followed an empty request scenario")
         else:
-            interaction = _Response(self.interactions[-1].provider_states)
+            interaction = _Response(
+                self.interactions[-1].provider_states, self._ce_serializer
+            )
             self.interactions.append(interaction)
         interaction.scenario = scenario
         return self
@@ -609,11 +613,11 @@ class _Narrative:
         interaction = self.interactions[-1]
         if type(interaction) == _Response:
             self.interactions[-1] = _RecurringResponse(
-                interaction.provider_states, _Event(terminator)
+                interaction.provider_states, _Event(terminator), self._ce_serializer
             )
         elif isinstance(interaction, _Request):
             self.interactions[-1] = _RecurringRequest(
-                interaction.provider_states, _Event(terminator)
+                interaction.provider_states, _Event(terminator), self._ce_serializer
             )
         elif isinstance(
             interaction, (_RecurringRequest, _RecurringResponse, _RecurringInteraction)

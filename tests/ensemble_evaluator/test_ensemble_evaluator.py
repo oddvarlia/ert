@@ -6,7 +6,6 @@ import pytest
 import asyncio
 import threading
 import queue
-import pickle
 
 from ert_shared.ensemble_evaluator.client import Client
 from ert_shared.ensemble_evaluator.entity import serialization
@@ -17,7 +16,6 @@ from ert_shared.status.entity.state import (
     JOB_STATE_RUNNING,
     ENSEMBLE_STATE_STOPPED,
 )
-from cloudevents.http import from_json
 from ert_shared.ensemble_evaluator.evaluator import (
     EnsembleEvaluator,
     ee_monitor,
@@ -146,13 +144,10 @@ def test_dispatchers_can_connect_and_monitor_can_shut_down_evaluator(evaluator):
 
 
 class Dialogue(object):
-    def __init__(
-        self, narrative: _Narrative, unmarshaller=serialization.evaluator_unmarshaller
-    ):
+    def __init__(self, narrative: _Narrative):
         self.narrative = narrative
         self.currentInteraction = narrative.interactions.pop()
         self.error = None
-        self._unmarshaller = unmarshaller
 
     async def _async_proxy(self, url, q):
         self.done = asyncio.get_event_loop().create_future()
@@ -160,11 +155,9 @@ class Dialogue(object):
         async def handle_messages(msg_q: asyncio.Queue, done: asyncio.Future):
             try:
                 for interaction in self.narrative.interactions:
-                    await interaction.verify(
-                        msg_q, data_unmarshaller=self._unmarshaller
-                    )
+                    await interaction.verify(msg_q)
             except Exception as e:
-                await done.set_result(e)
+                done.set_result(e)
 
         async def handle_server(server, client, msg_q):
             async for msg in server:
@@ -374,6 +367,7 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_
             ]
         )
         .on_uri(f"ws://localhost:{unused_tcp_port}")
+        .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
     )
     ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
     ensemble.addFailJob(real=1, step=0, job=1)
@@ -413,15 +407,7 @@ def test_verify_monitor_happy_path_narrative(ee_config):
     )
     ee.run()
 
-    monitor_happy_path_narrative.with_marshaller(
-        "application/json", serialization.evaluator_marshaller
-    ).with_unmarshaller(
-        "application/json", serialization.evaluator_unmarshaller
-    ).with_unmarshaller(
-        "application/octet-stream", pickle.loads
-    ).verify(
-        ee_config.client_uri, on_connect=ensemble.start
-    )
+    monitor_happy_path_narrative.verify(ee_config.client_uri, on_connect=ensemble.start)
     ensemble.join()
 
 

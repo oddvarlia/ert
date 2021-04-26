@@ -1,3 +1,5 @@
+import pickle
+from ert_shared.ensemble_evaluator.entity import serialization
 import re
 from ert_shared.status.entity.state import (
     ENSEMBLE_STATE_STARTED,
@@ -92,4 +94,7 @@ monitor_happy_path_narrative = (
             ),
         ]
     )
+    .with_marshaller("application/json", serialization.evaluator_marshaller)
+    .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
+    .with_unmarshaller("application/octet-stream", pickle.loads)
 )
