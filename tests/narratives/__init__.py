@@ -87,24 +87,6 @@ monitor_happy_path_narrative = (
             EventDescription(
                 type_=identifiers.EVTYPE_EE_TERMINATED,
                 source=ReMatch(re.compile(r"/ert/ee/ee."), "/ert/ee/ee-0"),
-            ),
-        ]
-    )
-)
-
-
-monitor_results = (
-    Consumer("Monitor")
-    .forms_narrative_with(
-        Provider("Ensemble Evaluator"),
-    )
-    .given("a stopped successful ensemble")
-    .responds_with("results")
-    .cloudevents_in_order(
-        [
-            EventDescription(
-                type_=identifiers.EVTYPE_EE_RESULT,
-                source=ReMatch(re.compile(r"/ert/ee/ee."), "/ert/ee/ee-0"),
                 datacontenttype="application/octet-stream",
                 data=b"\x80\x04\x95\x0f\x00\x00\x00\x00\x00\x00\x00\x8c\x0bhello world\x94.",
             ),

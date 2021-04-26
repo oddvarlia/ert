@@ -154,3 +154,4 @@ class TestEnsemble(_Ensemble):
     def with_result(self, result, datacontenttype):
         self.result = result
         self.result_datacontenttype = datacontenttype
+        return self

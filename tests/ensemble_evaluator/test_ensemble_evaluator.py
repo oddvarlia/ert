@@ -6,7 +6,7 @@ import pytest
 import asyncio
 import threading
 import queue
-import time
+import pickle
 
 from ert_shared.ensemble_evaluator.client import Client
 from ert_shared.ensemble_evaluator.entity import serialization
@@ -277,7 +277,7 @@ def test_ensemble_monitor_communication_given_success(ee_config, unused_tcp_port
             ]
         )
         .on_uri(f"ws://localhost:{unused_tcp_port}")
-        .with_unmarshaller(serialization.evaluator_unmarshaller)
+        .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
     )
 
     ee.run()
@@ -400,9 +400,11 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_
     ensemble.join()
 
 
-def test_verify_narratives(ee_config, caplog):
-    ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
-    ensemble.addFailJob(real=1, step=0, job=1)
+def test_verify_monitor_happy_path_narrative(ee_config):
+    ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2).with_result(
+        b"\x80\x04\x95\x0f\x00\x00\x00\x00\x00\x00\x00\x8c\x0bhello world\x94.",
+        "application/octet-stream",
+    )
     ee = EnsembleEvaluator(
         ensemble,
         ee_config,
@@ -412,8 +414,12 @@ def test_verify_narratives(ee_config, caplog):
     ee.run()
 
     monitor_happy_path_narrative.with_marshaller(
-        serialization.evaluator_marshaller
-    ).with_unmarshaller(serialization.evaluator_unmarshaller).verify(
+        "application/json", serialization.evaluator_marshaller
+    ).with_unmarshaller(
+        "application/json", serialization.evaluator_unmarshaller
+    ).with_unmarshaller(
+        "application/octet-stream", pickle.loads
+    ).verify(
         ee_config.client_uri, on_connect=ensemble.start
     )
     ensemble.join()

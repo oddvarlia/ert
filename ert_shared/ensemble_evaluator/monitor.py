@@ -6,6 +6,7 @@ import threading
 from cloudevents.http import from_json
 from cloudevents.http.event import CloudEvent
 from cloudevents.http import to_json
+from cloudevents.exceptions import DataUnmarshallerError
 import ert_shared.ensemble_evaluator.entity.identifiers as identifiers
 from ert_shared.ensemble_evaluator.entity import serialization
 import uuid
@@ -38,16 +39,16 @@ class _Monitor:
     def get_base_uri(self):
         return self._base_uri
 
-    def get_result(self):
-        async def _send():
-            async with websockets.connect(self._result_uri) as websocket:
-                result = await websocket.recv()
-                message = from_json(result, lambda x: pickle.loads(x))
-                return message.data
+    # def get_result(self):
+    #     async def _send():
+    #         async with websockets.connect(self._result_uri) as websocket:
+    #             result = await websocket.recv()
+    #             message = from_json(result, lambda x: pickle.loads(x))
+    #             return message.data
 
-        if self._loop.is_running():
-            return asyncio.run_coroutine_threadsafe(_send(), self._loop).result()
-        return self._loop.run_until_complete(_send())
+    #     if self._loop.is_running():
+    #         return asyncio.run_coroutine_threadsafe(_send(), self._loop).result()
+    #     return self._loop.run_until_complete(_send())
 
     def _send_event(self, cloud_event):
         message = to_json(
@@ -88,9 +89,12 @@ class _Monitor:
         )
 
         async for message in self._ws:
-            event = from_json(
-                message, data_unmarshaller=serialization.evaluator_unmarshaller
-            )
+            try:
+                event = from_json(
+                    message, data_unmarshaller=serialization.evaluator_unmarshaller
+                )
+            except DataUnmarshallerError:
+                event = from_json(message, data_unmarshaller=pickle.loads)
             self._incoming.put_nowait(event)
             if event["type"] == identifiers.EVTYPE_EE_TERMINATED:
                 logger.debug(f"monitor-{self._id} client received terminated")

@@ -3,6 +3,7 @@ from asyncio.events import AbstractEventLoop
 from asyncio.queues import QueueEmpty
 from datetime import date
 from enum import Enum, auto
+import json
 import re
 from typing import Any, Dict, List, Optional, Union
 import uuid
@@ -21,6 +22,57 @@ except ImportError:
 
 import websockets
 from cloudevents.http import CloudEvent, to_json, from_json
+
+_DATACONTENTTYPE = "datacontenttype"
+
+# An empty/missing datacontenttype is equivalent to json, so make it default.
+# See https://github.com/cloudevents/spec/blob/v1.0.1/spec.md#datacontenttype
+_DEFAULT_DATACONTETYPE = "application/json"
+
+
+class _CloudEventSerializer:
+    def __init__(self) -> None:
+        self._marshallers: Dict[str, types.MarshallerType] = {}
+        self._unmarshallers: Dict[str, types.UnmarshallerType] = {}
+
+    def register_marshaller(
+        self, datacontenttype: str, marshaller: types.MarshallerType
+    ) -> "_CloudEventSerializer":
+        self._marshallers[datacontenttype] = marshaller
+        return self
+
+    def register_unmarshaller(
+        self, datacontenttype: str, unmarshaller: types.UnmarshallerType
+    ) -> "_CloudEventSerializer":
+        self._unmarshallers[datacontenttype] = unmarshaller
+        return self
+
+    def to_json(
+        self, event: CloudEvent, data_marshaller: types.MarshallerType = None
+    ) -> Union[str, bytes]:
+        if not data_marshaller:
+            datacontenttype = (
+                event[_DATACONTENTTYPE]
+                if _DATACONTENTTYPE in event
+                else _DEFAULT_DATACONTETYPE
+            )
+            data_marshaller = self._marshallers.get(datacontenttype)
+        return to_json(event, data_marshaller=data_marshaller)
+
+    def from_json(
+        self,
+        data: Union[str, bytes],
+        data_unmarshaller: types.UnmarshallerType = None,
+    ) -> CloudEvent:
+        raw_ce = json.loads(data)
+        if not data_unmarshaller:
+            datacontenttype = (
+                raw_ce[_DATACONTENTTYPE]
+                if _DATACONTENTTYPE in raw_ce
+                else _DEFAULT_DATACONTETYPE
+            )
+            data_unmarshaller = self._unmarshallers.get(datacontenttype)
+        return from_json(data, data_unmarshaller=data_unmarshaller)
 
 
 class _ConnectionInformation(TypedDict):  # type: ignore
@@ -72,7 +124,7 @@ class _Event:
         self._id = description.get("id_", uuid.uuid4())
         self.source = description["source"]
         self.type_ = description["type_"]
-        self.datacontenttype = description.get("datacontenttype")
+        self.datacontenttype = description.get(_DATACONTENTTYPE)
         self.subject = description.get("subject")
         self.data = description.get("data")
 
@@ -93,9 +145,10 @@ class _Event:
         return s
 
     def dict_match(self, original, match, msg_start, path=""):
+        assert isinstance(original, dict), f"{msg_start}data is not a dict"
         for k, v in match.items():
             kpath = f"{path}/{k}"
-            assert isinstance(original, dict), f"{msg_start}data is not a dict"
+            assert isinstance(original, dict)
             assert k in original, f"{msg_start}{kpath} not present in data"
             if isinstance(v, dict):
                 assert isinstance(original[k], dict), f"{msg_start}{kpath} not a dict"
@@ -113,21 +166,12 @@ class _Event:
     def assert_matches(self, other: CloudEvent):
         msg_tmpl = "{self} did not match {other}: {reason}"
 
-        if self.data:
+        if isinstance(self.data, dict):
             self.dict_match(other.data, self.data, f"{self} did not match {other}: ")
-
-            # for k, v in self.data.items():
-            #     assert k in other.data, msg_tmpl.format(
-            #         self=self, other=other, reason=f"{k} not in {other.data}"
-            #     )
-            #     if isinstance(v, ReMatch):
-            #         assert v.regex.match(other.data[k]), msg_tmpl.format(
-            #             self=self, other=other, reason=f"no match for {v} in {k}"
-            #         )
-            #     else:
-            #         assert v == other.data[k], msg_tmpl.format(
-            #             self=self, other=other, reason=f"{v} != {other.data[k]} for {k}"
-            #         )
+        elif isinstance(self.data, bytes):
+            assert self.data == other.data, msg_tmpl.format(
+                self=self, other=other, reason=f"{self.data} != {other.data}"
+            )
 
         for attr in filter(
             lambda x: x[0] is not None,
@@ -135,7 +179,7 @@ class _Event:
                 (self.source, "source"),
                 (self.type_, "type"),
                 (self.subject, "subject"),
-                (self.datacontenttype, "datacontenttype"),
+                (self.datacontenttype, _DATACONTENTTYPE),
             ],
         ):
             if isinstance(attr[0], ReMatch):
@@ -155,7 +199,7 @@ class _Event:
             (self.source, "source"),
             (self.type_, "type"),
             (self.subject, "subject"),
-            (self.datacontenttype, "datacontenttype"),
+            (self.datacontenttype, _DATACONTENTTYPE),
         ]:
             if isinstance(attr[0], ReMatch):
                 attrs[attr[1]] = attr[0].replace_with
@@ -276,13 +320,11 @@ class _ProviderVerifier:
         self,
         interactions: List[_Interaction],
         uri: str,
-        unmarshaller: Optional[types.UnmarshallerType],
-        marshaller: Optional[types.MarshallerType],
+        ce_serializer: _CloudEventSerializer,
     ) -> None:
         self._interactions: List[_Interaction] = interactions
         self._uri = uri
-        self._unmarshaller = unmarshaller
-        self._marshaller = marshaller
+        self._ce_serializer = ce_serializer
 
         # A queue on which errors will be put
         self._errors: asyncio.Queue = asyncio.Queue()
@@ -312,17 +354,16 @@ class _ProviderVerifier:
                     self._errors.put_nowait(e)
                 elif isinstance(interaction, _Request):
                     for event in interaction.events:
-                        await websocket.send(to_json(event.to_cloudevent()))
+                        await websocket.send(
+                            self._ce_serializer.to_json(event.to_cloudevent())
+                        )
                     print("OK", interaction.scenario)
                 elif isinstance(interaction, _Response):
                     for event in interaction.events:
                         received_event = await websocket.recv()
                         try:
                             interaction.assert_matches(
-                                event,
-                                from_json(
-                                    received_event, data_unmarshaller=self._unmarshaller
-                                ),
+                                event, self._ce_serializer.from_json(received_event)
                             )
                         except AssertionError as e:
                             self._errors.put_nowait(e)
@@ -334,9 +375,7 @@ class _ProviderVerifier:
                         event_counter += 1
                         try:
                             interaction.assert_matches(
-                                from_json(
-                                    received_event, data_unmarshaller=self._unmarshaller
-                                )
+                                self._ce_serializer.from_json(received_event)
                             )
                         except _InteractionTermination:
                             break
@@ -372,15 +411,13 @@ class _ProviderMock:
         self,
         interactions: List[_Interaction],
         conn_info: _ConnectionInformation,
-        unmarshaller: Optional[types.UnmarshallerType],
-        marshaller: Optional[types.MarshallerType],
+        ce_serializer: _CloudEventSerializer,
     ) -> None:
         self._interactions: List[_Interaction] = interactions
         self._loop: Optional[AbstractEventLoop] = None
         self._ws: Optional[WebSocketServer] = None
         self._conn_info = conn_info
-        self._unmarshaller = unmarshaller
-        self._marshaller = marshaller
+        self._ce_serializer = ce_serializer
 
         # A queue on which errors will be put
         self._errors: asyncio.Queue = asyncio.Queue()
@@ -413,10 +450,7 @@ class _ProviderMock:
                     received_event = await websocket.recv()
                     try:
                         interaction.assert_matches(
-                            event,
-                            from_json(
-                                received_event, data_unmarshaller=self._unmarshaller
-                            ),
+                            event, self._ce_serializer.from_json(received_event)
                         )
                     except AssertionError as e:
                         self._errors.put_nowait(e)
@@ -424,19 +458,16 @@ class _ProviderMock:
             elif isinstance(interaction, _Response):
                 for event in interaction.events:
                     await websocket.send(
-                        to_json(event.to_cloudevent(), data_marshaller=self._marshaller)
+                        self._ce_serializer.to_json(event.to_cloudevent())
                     )
                 print("OK", interaction.scenario)
             elif isinstance(interaction, _RecurringResponse):
                 for event in interaction.events:
                     await websocket.send(
-                        to_json(event.to_cloudevent(), data_marshaller=self._marshaller)
+                        self._ce_serializer.to_json(event.to_cloudevent())
                     )
                 await websocket.send(
-                    to_json(
-                        interaction.terminator.to_cloudevent(),
-                        data_marshaller=self._marshaller,
-                    )
+                    self._ce_serializer.to_json(interaction.terminator.to_cloudevent())
                 )
                 print("OK", interaction.scenario)
             elif isinstance(interaction, _RecurringRequest):
@@ -445,7 +476,9 @@ class _ProviderMock:
                     received_event = await websocket.recv()
                     event_counter += 1
                     try:
-                        interaction.assert_matches(received_event)
+                        interaction.assert_matches(
+                            self._ce_serializer.from_json(received_event)
+                        )
                     except _InteractionTermination:
                         break
                     except AssertionError as e:
@@ -521,8 +554,7 @@ class _Narrative:
         self.interactions: List[_Interaction] = []
         self._mock: Optional[_ProviderMock] = None
         self._conn_info: Optional[_ConnectionInformation] = None
-        self._unmarshaller: Optional[types.UnmarshallerType] = None
-        self._marshaller: Optional[types.MarshallerType] = None
+        self._ce_serializer = _CloudEventSerializer()
 
     def given(self, provider_state: Optional[str], **params) -> "_Narrative":
         state = None
@@ -599,12 +631,16 @@ class _Narrative:
         self._conn_info = _ConnectionInformation.from_uri(uri)
         return self
 
-    def with_unmarshaller(self, data_unmarshaller: types.UnmarshallerType):
-        self._unmarshaller = data_unmarshaller
+    def with_unmarshaller(
+        self, datacontenttype: str, data_unmarshaller: types.UnmarshallerType
+    ):
+        self._ce_serializer.register_unmarshaller(datacontenttype, data_unmarshaller)
         return self
 
-    def with_marshaller(self, data_marshaller: types.MarshallerType):
-        self._marshaller = data_marshaller
+    def with_marshaller(
+        self, datacontenttype: str, data_marshaller: types.MarshallerType
+    ):
+        self._ce_serializer.register_marshaller(datacontenttype, data_marshaller)
         return self
 
     @property
@@ -615,14 +651,12 @@ class _Narrative:
 
     def _reset(self):
         self._conn_info = None
-        self._unmarshaller = None
-        self._marshaller = None
 
     def __enter__(self):
         if not self._conn_info:
             raise ValueError("no connection info on mock")
         self._mock = _ProviderMock(
-            self.interactions, self._conn_info, self._unmarshaller, self._marshaller
+            self.interactions, self._conn_info, self._ce_serializer
         )
         return self._mock.__enter__()
 
@@ -634,7 +668,7 @@ class _Narrative:
         if not self._conn_info:
             raise ValueError("no connection info on mock")
         self._mock = _ProviderMock(
-            self.interactions, self._conn_info, self._unmarshaller, self._marshaller
+            self.interactions, self._conn_info, self._ce_serializer
         )
         return await self._mock.__aenter__()
 
@@ -643,9 +677,9 @@ class _Narrative:
         self._reset()
 
     def verify(self, provider_uri, on_connect) -> _ProviderVerifier:
-        _ProviderVerifier(
-            self.interactions, provider_uri, self._unmarshaller, self._marshaller
-        ).verify(on_connect)
+        _ProviderVerifier(self.interactions, provider_uri, self._ce_serializer).verify(
+            on_connect
+        )
 
 
 class _Actor:

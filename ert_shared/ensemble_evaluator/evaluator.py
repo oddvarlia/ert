@@ -279,16 +279,17 @@ class EnsembleEvaluator:
         logger.debug("Server thread exiting.")
 
     def terminate_message(self):
-        out_cloudevent = CloudEvent(
-            {
-                "type": identifiers.EVTYPE_EE_TERMINATED,
-                "source": f"/ert/ee/{self._ee_id}",
-                "id": str(self.event_index()),
-            }
-        )
-        message = to_json(
-            out_cloudevent, data_marshaller=serialization.evaluator_marshaller
-        ).decode()
+        attrs = {
+            "type": identifiers.EVTYPE_EE_TERMINATED,
+            "source": f"/ert/ee/{self._ee_id}",
+            "id": str(self.event_index()),
+        }
+        data = None
+        if self._result:
+            attrs["datacontenttype"] = "application/octet-stream"
+            data = cloudpickle.dumps(self._result)
+        out_cloudevent = CloudEvent(attrs, data)
+        message = to_json(out_cloudevent, data_marshaller=cloudpickle.dumps).decode()
         return message
 
     def event_index(self):

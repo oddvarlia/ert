@@ -4,15 +4,7 @@ from ert_shared.status.entity.state import (
     ENSEMBLE_STATE_STOPPED,
 )
 
-from tests.narratives import monitor_happy_path_narrative, monitor_results
-
-
-def test_done(unused_tcp_port):
-    with monitor_results.on_uri(
-        f"ws://localhost:{unused_tcp_port}/result"
-    ) as narrative_mock:
-        with _Monitor(narrative_mock.hostname, narrative_mock.port) as monitor:
-            assert monitor.get_result() == "hello world"
+from tests.narratives import monitor_happy_path_narrative
 
 
 def test_consume(unused_tcp_port):
@@ -30,5 +22,7 @@ def test_consume(unused_tcp_port):
         with _Monitor(narrative_mock.hostname, narrative_mock.port) as monitor:
             for event in monitor.track():
                 assert event["type"] == next(expected_events_types)
+                if event["type"] == ids.EVTYPE_EE_TERMINATED:
+                    return
                 if event.data and event.data.get(ids.STATUS) == ENSEMBLE_STATE_STOPPED:
                     monitor.signal_done()
