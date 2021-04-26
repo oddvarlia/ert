@@ -23,6 +23,7 @@ class TestEnsemble(_Ensemble):
         self.jobs = jobs
         self.fail_jobs = []
         self.result = None
+        self.result_datacontenttype = None
 
         the_reals = [
             _Realization(

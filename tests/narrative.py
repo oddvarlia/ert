@@ -92,23 +92,30 @@ class _Event:
         s += f"Id: {self._id})"
         return s
 
-    def dict_match(self, original, match):
+    def dict_match(self, original, match, msg_start, path=""):
         for k, v in match.items():
-            assert k in original
+            kpath = f"{path}/{k}"
+            assert isinstance(original, dict), f"{msg_start}data is not a dict"
+            assert k in original, f"{msg_start}{kpath} not present in data"
             if isinstance(v, dict):
-                assert isinstance(original[k], dict)
-                self.dict_match(original[k], v)
+                assert isinstance(original[k], dict), f"{msg_start}{kpath} not a dict"
+                self.dict_match(original[k], v, msg_start, kpath)
             elif isinstance(v, ReMatch):
-                assert isinstance(original[k], str)
-                assert v.regex.match(original[k])
+                assert isinstance(original[k], str), f"{msg_start}{kpath} not a str"
+                assert v.regex.match(
+                    original[k]
+                ), f"{msg_start}{kpath} did not match {v}"
             else:
-                assert original[k] == v
+                assert (
+                    original[k] == v
+                ), f"{msg_start}{kpath} value ({original[k]}) is not equal to ({v})"
 
     def assert_matches(self, other: CloudEvent):
         msg_tmpl = "{self} did not match {other}: {reason}"
 
         if self.data:
-            self.dict_match(other.data, self.data)
+            self.dict_match(other.data, self.data, f"{self} did not match {other}: ")
+
             # for k, v in self.data.items():
             #     assert k in other.data, msg_tmpl.format(
             #         self=self, other=other, reason=f"{k} not in {other.data}"
@@ -166,17 +173,41 @@ class _Event:
         return CloudEvent(attrs, data)
 
 
+class InteractionDirection(Enum):
+    RESPONSE = 1
+    REQUEST = 2
+
+    def represents(self, interaction):
+        return (
+            isinstance(interaction, (_Request, _RecurringRequest))
+            and self == InteractionDirection.REQUEST
+            or isinstance(interaction, (_Response, _RecurringResponse))
+            and self == InteractionDirection.RESPONSE
+        )
+
+
 class _Interaction:
     def __init__(self, provider_states: Optional[List[Dict[str, Any]]]) -> None:
         self.provider_states: Optional[List[Dict[str, Any]]] = provider_states
         self.scenario: str = ""
         self.events: List[_Event] = []
+        self.direction = None
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(Scenario: {self.scenario})"
 
     def assert_matches(self, event: _Event, other: CloudEvent):
         event.assert_matches(other)
+
+    async def verify(self, msg_q, data_unmarshaller=None):
+        for event in self.events:
+            source, msg = await msg_q.get()
+            assert source.represents(self), f"Wrong direction for {self}"
+            self.assert_matches(
+                event,
+                from_json(msg, data_unmarshaller=data_unmarshaller),
+            )
+        print("OK", self.scenario)
 
 
 class _RecurringInteraction(_Interaction):
@@ -189,7 +220,8 @@ class _RecurringInteraction(_Interaction):
     def assert_matches(self, other: CloudEvent):
         try:
             self.terminator.assert_matches(other)
-        except AssertionError:
+        except AssertionError as e:
+            terminator_error = e
             pass
         else:
             raise _InteractionTermination()
@@ -201,7 +233,22 @@ class _RecurringInteraction(_Interaction):
                 continue
             else:
                 return
-        raise AssertionError(f"No event in {self} matched {other}")
+
+        raise AssertionError(
+            f"No event in {self}\n matched {other}.\nDid not match terminator because: {terminator_error}"
+        )
+
+    async def verify(self, msg_q, data_unmarshaller=None):
+        while True:
+            source, msg = await msg_q.get()
+            assert source.represents(self), f"Wrong direction for {self}"
+            try:
+                self.assert_matches(
+                    from_json(msg, data_unmarshaller=data_unmarshaller),
+                )
+            except _InteractionTermination:
+                break
+        print("OK", self.scenario)
 
 
 class _Request(_Interaction):

@@ -38,6 +38,7 @@ from tests.narrative import (
     _RecurringResponse,
     _RecurringRequest,
     ReMatch,
+    InteractionDirection,
 )
 from tests.narratives import monitor_happy_path_narrative
 
@@ -153,102 +154,21 @@ class Dialogue(object):
         self.error = None
         self._unmarshaller = unmarshaller
 
-    async def verify_event(self, ce, type):
-        if not self.currentInteraction.events:
-            self.currentInteraction = self.narrative.interactions.pop()
-        event = self.currentInteraction.events[0]
-        if not event.repeating:
-            assert isinstance(self.currentInteraction, type)
-            assert event.matches(ce)
-            self.currentInteraction.events.pop(0)
-        else:
-            # repeating
-
-            if isinstance(
-                self.narrative.interactions[-1], type
-            ) and self.narrative.interactions[-1].events[0].matches(ce):
-                self.currentInteraction = self.narrative.interactions.pop()
-
-            if isinstance(self.currentInteraction, type):
-                if not event.matches(ce):
-                    self.currentInteraction = self.narrative.interactions.pop()
-                    event = self.currentInteraction.events[0]
-                    assert event.matches(ce)
-            else:
-                self.currentInteraction = self.narrative.interactions.pop()
-                event = self.currentInteraction.events[0]
-                assert event.matches(ce)
-                if not event.repeating:
-                    self.currentInteraction.events.pop(0)
-
     async def _async_proxy(self, url, q):
         self.done = asyncio.get_event_loop().create_future()
 
         async def handle_messages(msg_q: asyncio.Queue, done: asyncio.Future):
             try:
                 for interaction in self.narrative.interactions:
-
-                    print(f"Awaiting {interaction.__class__}")
-                    if type(interaction) == _Interaction:
-                        e = TypeError(
-                            "the first interaction needs to be promoted to either response or receive"
-                        )
-                        await done.set_result(e)
-                        return
-                    elif isinstance(interaction, _Request):
-                        for event in interaction.events:
-                            source, msg = await msg_q.get()
-                            assert source == "client"
-
-                            interaction.assert_matches(
-                                event,
-                                from_json(msg, data_unmarshaller=self._unmarshaller),
-                            )
-                        print("OK", interaction.scenario)
-                    elif isinstance(interaction, _Response):
-                        for event in interaction.events:
-                            source, msg = await msg_q.get()
-                            assert source == "server"
-
-                            interaction.assert_matches(
-                                event,
-                                from_json(msg, data_unmarshaller=self._unmarshaller),
-                            )
-                        print("OK", interaction.scenario)
-                    elif isinstance(interaction, _RecurringResponse):
-                        while True:
-                            source, msg = await msg_q.get()
-                            assert source == "server"
-                            try:
-                                interaction.assert_matches(
-                                    from_json(msg, data_unmarshaller=self._unmarshaller)
-                                )
-                            except _InteractionTermination:
-                                break
-                        print("OK", interaction.scenario)
-                    elif isinstance(interaction, _RecurringRequest):
-                        while True:
-                            source, msg = await msg_q.get()
-                            assert source == "client"
-                            try:
-                                interaction.assert_matches(
-                                    from_json(msg, data_unmarshaller=self._unmarshaller)
-                                )
-                            except _InteractionTermination:
-                                break
-                        print("OK", interaction.scenario)
-                    else:
-                        e = TypeError(
-                            f"expected either receive or response, got {interaction}"
-                        )
-                        await done.set_result(e)
-                    print(f"done waiting")
+                    await interaction.verify(
+                        msg_q, data_unmarshaller=self._unmarshaller
+                    )
             except Exception as e:
                 await done.set_result(e)
 
         async def handle_server(server, client, msg_q):
             async for msg in server:
-                await msg_q.put(("server", msg))
+                await msg_q.put((InteractionDirection.RESPONSE, msg))
                 print(f"from server: {msg}")
                 await client.send(msg)
 
@@ -263,7 +183,7 @@ class Dialogue(object):
 
                     async for msg in client:
                         print(f"from client: {msg}")
-                        await msg_q.put(("client", msg))
+                        await msg_q.put((InteractionDirection.REQUEST, msg))
                         await server.send(msg)
 
                     server_task.cancel()
@@ -442,6 +362,8 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_
                 )
             ]
         )
+        # .receives("something bad")
+        # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT, source=ReMatch(re.compile(".*"), ""))])
         .responds_with("Termination")
         .cloudevents_in_order(
             [
