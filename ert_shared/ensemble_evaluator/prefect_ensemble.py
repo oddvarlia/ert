@@ -6,6 +6,8 @@ import os
 import signal
 import threading
 import uuid
+from datetime import timedelta
+from functools import partial
 
 import cloudpickle
 import prefect.utilities.logging
@@ -171,15 +173,27 @@ class PrefectEnsemble(_Ensemble):
             for iens in real_range:
                 transmitter_map[iens] = {
                     record: transmitter
-                    for record, transmitter in self.config["inputs"][iens].items()
+                    for record, transmitter in self.config[ids.INPUTS][iens].items()
                 }
                 for step in self._reals[iens].get_steps_sorted_topologically():
                     inputs = {
                         inp.get_name(): transmitter_map[iens][inp.get_name()]
                         for inp in step.get_inputs()
                     }
-                    outputs = self.config["outputs"][iens]
-                    step_task = step.get_task(outputs, ee_id, name=str(iens))
+                    outputs = self.config[ids.OUTPUTS][iens]
+                    max_retries = self.config.get(ids.MAX_RETRIES, 0)
+                    retry_delay = None if max_retries == 0 else timedelta(seconds=10)
+                    step_task = step.get_task(
+                        outputs,
+                        ee_id,
+                        name=str(iens),
+                        max_retries=max_retries,
+                        retry_delay=retry_delay,
+                        on_failure=partial(
+                            self._on_task_failure,
+                            url=self._ee_dispach_url,
+                        ),
+                    )
                     result = step_task(inputs=inputs)
                     self._iens_to_task[iens] = result
                     for output in step.get_outputs():
