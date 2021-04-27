@@ -257,7 +257,6 @@ class _Interaction:
             yield self.ce_serializer.to_json(event.to_cloudevent())
 
 
-
 class _RecurringInteraction(_Interaction):
     def __init__(
         self,
@@ -367,8 +366,10 @@ class _ProviderVerifier:
                         await websocket.send(msg)
                     print("OK", interaction.scenario)
                 elif InteractionDirection.RESPONSE.represents(interaction):
+
                     async def receive():
                         return InteractionDirection.RESPONSE, await websocket.recv()
+
                     try:
                         interaction.verify(receive)
                     except AssertionError as e:
@@ -434,8 +435,10 @@ class _ProviderMock:
                     for msg in interaction.generate():
                         await websocket.send(msg)
                 elif InteractionDirection.REQUEST.represents(interaction):
+
                     async def receive():
                         return InteractionDirection.REQUEST, await websocket.recv()
+
                     await interaction.verify(receive)
                 else:
                     e = TypeError(
@@ -446,6 +449,7 @@ class _ProviderMock:
             self._errors.put_nowait(e)
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             print(e)
             raise
