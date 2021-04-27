@@ -245,10 +245,14 @@ class _Interaction:
     def assert_matches(self, event: _Event, other: CloudEvent):
         event.assert_matches(other)
 
-    async def verify(self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]):
+    async def verify(
+        self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]
+    ):
         for event in self.events:
             source, msg = await msg_producer()
-            assert source.represents(self), f"Wrong direction {source} when expecting {self}\n Got: {msg} instead"
+            assert source.represents(
+                self
+            ), f"Wrong direction {source} when expecting {self}\n Got: {msg} instead"
             self.assert_matches(event, self.ce_serializer.from_json(msg))
         print("OK", self.scenario)
 
@@ -288,10 +292,14 @@ class _RecurringInteraction(_Interaction):
             f"No event in {self}\n matched {other}.\nDid not match terminator because: {terminator_error}"
         )
 
-    async def verify(self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]):
+    async def verify(
+        self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]
+    ):
         while True:
             source, msg = await msg_producer()
-            assert source.represents(self), f"Wrong direction {source} when expecting {self}\n Got: {msg} instead"
+            assert source.represents(
+                self
+            ), f"Wrong direction {source} when expecting {self}\n Got: {msg} instead"
             try:
                 self.assert_matches(self.ce_serializer.from_json(msg))
             except _InteractionTermination:

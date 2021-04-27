@@ -211,7 +211,7 @@ class Dialogue(object):
         t.join()
         error = q.get()
         if error:
-            raise AssertionError("Sum thing wong") from error
+            raise error
 
 
 def test_ensemble_monitor_communication_given_success(ee_config, unused_tcp_port):
@@ -258,8 +258,6 @@ def test_ensemble_monitor_communication_given_success(ee_config, unused_tcp_port
                 )
             ]
         )
-        # .receives("Kødd")
-        # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_USER_DONE, source="Frode")])
         .responds_with("Termination")
         .cloudevents_in_order(
             [
@@ -355,8 +353,6 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_
                 )
             ]
         )
-        # .receives("something bad")
-        # .cloudevents_in_order([EventDescription(type_=identifiers.EVTYPE_EE_SNAPSHOT, source=ReMatch(re.compile(".*"), ""))])
         .responds_with("Termination")
         .cloudevents_in_order(
             [
@@ -367,7 +363,7 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_
             ]
         )
         .on_uri(f"ws://localhost:{unused_tcp_port}")
-        # .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
+        .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
     )
     ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
     ensemble.addFailJob(real=1, step=0, job=1)
