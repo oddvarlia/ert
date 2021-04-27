@@ -4,7 +4,7 @@ from asyncio.queues import QueueEmpty
 from enum import Enum, auto
 import json
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Callable, Tuple
 import uuid
 import threading
 
@@ -245,7 +245,7 @@ class _Interaction:
     def assert_matches(self, event: _Event, other: CloudEvent):
         event.assert_matches(other)
 
-    async def verify(self, msg_producer):
+    async def verify(self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]):
         for event in self.events:
             source, msg = await msg_producer()
             assert source.represents(self), f"Wrong direction for {self}"
@@ -288,7 +288,7 @@ class _RecurringInteraction(_Interaction):
             f"No event in {self}\n matched {other}.\nDid not match terminator because: {terminator_error}"
         )
 
-    async def verify(self, msg_producer):
+    async def verify(self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]):
         while True:
             source, msg = await msg_producer()
             assert source.represents(self), f"Wrong direction for {self}"
