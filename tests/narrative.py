@@ -245,12 +245,17 @@ class _Interaction:
     def assert_matches(self, event: _Event, other: CloudEvent):
         event.assert_matches(other)
 
-    async def verify(self, msg_q):
+    async def verify(self, msg_producer):
         for event in self.events:
-            source, msg = await msg_q.get()
+            source, msg = await msg_producer()
             assert source.represents(self), f"Wrong direction for {self}"
             self.assert_matches(event, self.ce_serializer.from_json(msg))
         print("OK", self.scenario)
+
+    def generate(self):
+        for event in self.events:
+            yield self.ce_serializer.to_json(event.to_cloudevent())
+
 
 
 class _RecurringInteraction(_Interaction):
@@ -284,15 +289,20 @@ class _RecurringInteraction(_Interaction):
             f"No event in {self}\n matched {other}.\nDid not match terminator because: {terminator_error}"
         )
 
-    async def verify(self, msg_q):
+    async def verify(self, msg_producer):
         while True:
-            source, msg = await msg_q.get()
+            source, msg = await msg_producer()
             assert source.represents(self), f"Wrong direction for {self}"
             try:
                 self.assert_matches(self.ce_serializer.from_json(msg))
             except _InteractionTermination:
                 break
         print("OK", self.scenario)
+
+    def generate(self):
+        for event in self.events:
+            yield self.ce_serializer.to_json(event.to_cloudevent())
+        yield self.ce_serializer.to_json(self.terminator.to_cloudevent())
 
 
 class _Request(_Interaction):
@@ -352,39 +362,18 @@ class _ProviderVerifier:
                         "the first interaction needs to be promoted to either response or receive"
                     )
                     self._errors.put_nowait(e)
-                elif isinstance(interaction, _Request):
-                    for event in interaction.events:
-                        await websocket.send(
-                            self._ce_serializer.to_json(event.to_cloudevent())
-                        )
+                elif InteractionDirection.REQUEST.represents(interaction):
+                    for msg in interaction.generate():
+                        await websocket.send(msg)
                     print("OK", interaction.scenario)
-                elif isinstance(interaction, _Response):
-                    for event in interaction.events:
-                        received_event = await websocket.recv()
-                        try:
-                            interaction.assert_matches(
-                                event, self._ce_serializer.from_json(received_event)
-                            )
-                        except AssertionError as e:
-                            self._errors.put_nowait(e)
+                elif InteractionDirection.RESPONSE.represents(interaction):
+                    async def receive():
+                        return InteractionDirection.RESPONSE, await websocket.recv()
+                    try:
+                        interaction.verify(receive)
+                    except AssertionError as e:
+                        self._errors.put_nowait(e)
                     print("OK", interaction.scenario)
-                elif isinstance(interaction, _RecurringResponse):
-                    event_counter = 0
-                    while True:
-                        received_event = await websocket.recv()
-                        event_counter += 1
-                        try:
-                            interaction.assert_matches(
-                                self._ce_serializer.from_json(received_event)
-                            )
-                        except _InteractionTermination:
-                            break
-                        except AssertionError as e:
-                            self._errors.put_nowait(e)
-                            break
-                    print(f"OK ({event_counter} events)", interaction.scenario)
-                elif isinstance(interaction, _RecurringRequest):
-                    raise TypeError("don't know how to request recurringly")
                 else:
                     e = TypeError(
                         f"expected either receive or response, got {interaction}"
@@ -439,55 +428,27 @@ class _ProviderMock:
         if path != expected_path:
             print(f"not handling {path} as it is not the expected path {expected_path}")
             return
-        for interaction in self._interactions:
-            if type(interaction) == _Interaction:
-                e = TypeError(
-                    "the first interaction needs to be promoted to either response or receive"
-                )
-                self._errors.put_nowait(e)
-            elif isinstance(interaction, _Request):
-                for event in interaction.events:
-                    received_event = await websocket.recv()
-                    try:
-                        interaction.assert_matches(
-                            event, self._ce_serializer.from_json(received_event)
-                        )
-                    except AssertionError as e:
-                        self._errors.put_nowait(e)
-                print("OK", interaction.scenario)
-            elif isinstance(interaction, _Response):
-                for event in interaction.events:
-                    await websocket.send(
-                        self._ce_serializer.to_json(event.to_cloudevent())
+        try:
+            for interaction in self._interactions:
+                if InteractionDirection.RESPONSE.represents(interaction):
+                    for msg in interaction.generate():
+                        await websocket.send(msg)
+                elif InteractionDirection.REQUEST.represents(interaction):
+                    async def receive():
+                        return InteractionDirection.REQUEST, await websocket.recv()
+                    await interaction.verify(receive)
+                else:
+                    e = TypeError(
+                        "the first interaction needs to be promoted to either response or receive"
                     )
-                print("OK", interaction.scenario)
-            elif isinstance(interaction, _RecurringResponse):
-                for event in interaction.events:
-                    await websocket.send(
-                        self._ce_serializer.to_json(event.to_cloudevent())
-                    )
-                await websocket.send(
-                    self._ce_serializer.to_json(interaction.terminator.to_cloudevent())
-                )
-                print("OK", interaction.scenario)
-            elif isinstance(interaction, _RecurringRequest):
-                event_counter = 0
-                while True:
-                    received_event = await websocket.recv()
-                    event_counter += 1
-                    try:
-                        interaction.assert_matches(
-                            self._ce_serializer.from_json(received_event)
-                        )
-                    except _InteractionTermination:
-                        break
-                    except AssertionError as e:
-                        self._errors.put_nowait(e)
-                        break
-                print(f"OK ({event_counter} events)", interaction.scenario)
-            else:
-                e = TypeError(f"expected either receive or response, got {interaction}")
-                self._errors.put_nowait(e)
+                    self._errors.put_nowait(e)
+        except AssertionError as e:
+            self._errors.put_nowait(e)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(e)
+            raise
 
     def _sync_ws(self, delay_startup=0):
         self._loop = asyncio.new_event_loop()

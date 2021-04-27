@@ -155,7 +155,7 @@ class Dialogue(object):
         async def handle_messages(msg_q: asyncio.Queue, done: asyncio.Future):
             try:
                 for interaction in self.narrative.interactions:
-                    await interaction.verify(msg_q)
+                    await interaction.verify(msg_q.get)
             except Exception as e:
                 done.set_result(e)
 
