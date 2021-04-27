@@ -379,7 +379,7 @@ class _ProviderVerifier:
                         return InteractionDirection.RESPONSE, await websocket.recv()
 
                     try:
-                        interaction.verify(receive)
+                        await interaction.verify(receive)
                     except AssertionError as e:
                         self._errors.put_nowait(e)
                     print("OK", interaction.scenario)
