@@ -367,7 +367,7 @@ def test_ensemble_monitor_communication_given_failing_job(ee_config, unused_tcp_
             ]
         )
         .on_uri(f"ws://localhost:{unused_tcp_port}")
-        .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
+        # .with_unmarshaller("application/json", serialization.evaluator_unmarshaller)
     )
     ensemble = TestEnsemble(iter=1, reals=2, steps=2, jobs=2)
     ensemble.addFailJob(real=1, step=0, job=1)

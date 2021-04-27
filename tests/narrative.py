@@ -248,7 +248,7 @@ class _Interaction:
     async def verify(self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]):
         for event in self.events:
             source, msg = await msg_producer()
-            assert source.represents(self), f"Wrong direction for {self}"
+            assert source.represents(self), f"Wrong direction {source} when expecting {self}\n Got: {msg} instead"
             self.assert_matches(event, self.ce_serializer.from_json(msg))
         print("OK", self.scenario)
 
@@ -291,7 +291,7 @@ class _RecurringInteraction(_Interaction):
     async def verify(self, msg_producer: Callable[[], Tuple[InteractionDirection, str]]):
         while True:
             source, msg = await msg_producer()
-            assert source.represents(self), f"Wrong direction for {self}"
+            assert source.represents(self), f"Wrong direction {source} when expecting {self}\n Got: {msg} instead"
             try:
                 self.assert_matches(self.ce_serializer.from_json(msg))
             except _InteractionTermination:
