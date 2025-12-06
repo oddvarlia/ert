@@ -18,7 +18,7 @@ import numpy as np
 import polars as pl
 import psutil
 import scipy
-from iterative_ensemble_smoother.experimental import AdaptiveESMDA
+from iterative_ensemble_smoother.experimental import AdaptiveESMDA, DistanceESMDA
 
 from ert.config import (
     ESSettings,
@@ -174,6 +174,89 @@ def _calculate_adaptive_batch_size(num_params: int, num_obs: int) -> int:
         ),
         num_params,
     )
+
+
+def _calc_max_number_of_layers_per_batch_for_distance_localization(
+    nx: int,
+    ny: int,
+    nz: int,
+    num_obs: int,
+    bytes_per_float: int = 8,  # float64 as default here
+) -> int:
+    """Calculate number of layers from a 3D field parameter that can be updated
+    within available memory. Distance-based localization requires two large matrices
+    the Kalman gain matrix K and the localization scaling matrix RHO, both have size
+    equal to number of field parameter values times number of observations.
+    Therefore, a batching algorithm is used where only a subset of parameters
+    is used when calculating the Schur product of RHO and K matrix in the update
+    algorithm. This function calculates number of batches and
+    number of grid layers of field parameter values that can fit
+    into the available memory for one batch accounting for a safety margin.
+
+    The available memory is checked using the `psutil` library, which provides
+    information about system memory usage.
+    From `psutil` documentation:
+    - available:
+        the memory that can be given instantly to processes without the
+        system going into swap.
+        This is calculated by summing different memory values depending
+        on the platform and it is supposed to be used to monitor actual
+        memory usage in a cross platform fashion.
+
+    Args:
+        nx: grid size in I-direction (local x-axis direction)
+        ny: grid size in J-direction (local y-axis direction)
+        nz: grid size in K-direction (number of layers)
+        num_obs: Number of observations
+        bytes_per_float: Is 4 or 8
+
+    Returns:
+        Max number of layers that can be updated in one batch to
+        avoid memory problems.
+
+    """
+
+    memory_safety_factor = 0.8
+    num_params = nx * ny * nz
+    num_param_per_layer = nx * ny
+    nmatrices = 2  # Both RHO and K matrix of same size
+    available_memory_in_bytes = psutil.virtual_memory().available * memory_safety_factor
+    total_required_memory_per_field_param = (
+        num_params * num_obs * bytes_per_float * nmatrices
+    )
+    max_nparam_in_rho = int(
+        available_memory_in_bytes / (bytes_per_float * num_obs * nmatrices)
+    )
+    if max_nparam_in_rho < num_param_per_layer:
+        raise MemoryError(
+            f"Max number of parameters is {max_nparam_in_rho} for available memory.\n"
+            f"      Number of parameters in one grid layer is "
+            f"{num_param_per_layer} > {max_nparam_in_rho}.\n"
+            f"      The algorithm are updating only whole layers of grid parameters "
+            "but in this\n"
+            "      case the number of parameters per layer requires more "
+            "memory than available."
+        )
+
+    number_of_layers_in_one_batch = min(
+        nz, int(max_nparam_in_rho / num_param_per_layer)
+    )
+
+    log_msg = (
+        "Calculate batch size for updating of field parameter:\n"
+        f" Number of parameters in total per field param: {num_params}\n"
+        " Required number of floats to update one field parameter: "
+        f"{num_params * num_obs * nmatrices / 10**9}*10**9\n"
+        " Available memory per field param update: "
+        f"{available_memory_in_bytes / 10**9} GB\n"
+        " Available memory can handle number of params in RHO: "
+        f"{int(max_nparam_in_rho)}\n"
+        " Required memory total to update a field parameter: "
+        f"{total_required_memory_per_field_param / 10**9} GB\n"
+        f" Number of layers in one batch: {number_of_layers_in_one_batch}"
+    )
+    logger.info(log_msg)
+    return number_of_layers_in_one_batch
 
 
 def analysis_ES(
@@ -492,3 +575,192 @@ def smoother_update(
         )
     )
     return smoother_snapshot
+
+
+def update_3D_field_with_distance_esmda(
+    distance_based_esmda_smoother: DistanceESMDA,
+    field_param_name: str,
+    X_prior: npt.NDArray[np.float64],
+    Y: npt.NDArray[np.float64],
+    rho_2D: npt.NDArray[np.float64],
+    nx: int,
+    ny: int,
+    nz: int,
+) -> npt.NDArray[np.float64]:
+    """
+    Calculate posterior update with distance-based ESMDA for one 3D parameter
+    The RHO for one layer of the 3D field parameter is input.
+    This is copied to all other layers of RHO in each batch of grid parameter
+    layers since only lateral distance is used when calculating distances.
+    Result is posterior parameter matrices of field parameters for one field.
+
+    Args:
+        distance_based_esmda_smooter: Object of DistanceESMDA class initialized for use
+        field_param_name: Name of 3D parameter
+        X_prior: Matrix with prior realizations of all field parameters,
+                 shape=(nparameters, nrealizations)
+        Y: Matrix with response values for each observations for each realization,
+                 shape=(nobservations, nrealizations)
+        rho_2D: RHO matrix elements for one 3D grid layer with size (nx, ny),
+                 shape=(nx,ny,nobservations)
+        nx, ny, nz: Dimensions of the 3D grid filled with a 3D field parameter.
+
+    Results:
+        X_post_3D: Posterior ensemble of field parameters,
+          shape=(nx, ny, nz, nrealizations)
+    """
+    nparam_per_layer = nx * ny
+    nparam = nparam_per_layer * nz
+    nobs = Y.shape[0]
+    nreal = Y.shape[1]
+
+    assert X_prior.shape[0] == nparam
+    assert X_prior.shape[1] == nreal
+
+    log_msg = f"Calculate Distance-based ESMDA update for {field_param_name} "
+    log_msg += f"with {nparam} parameters"
+    logger.info(log_msg)
+
+    max_nlayers_per_batch = (
+        _calc_max_number_of_layers_per_batch_for_distance_localization(
+            nx, ny, nz, nobs, bytes_per_float=8
+        )
+    )  # Use float64
+
+    nlayer_per_batch = min(max_nlayers_per_batch, nz)
+    nbatch = int(nz / nlayer_per_batch)
+
+    log_msg = (
+        "Memory required for RHO and K matrix per batch update with 64 bit float: "
+        f"{2 * nx * ny * nlayer_per_batch * nobs * 8 / 10**9} GB"
+    )
+    logger.info(log_msg)
+
+    X_prior_3D = X_prior.reshape(nx, ny, nz, nreal)
+    X_post_3D = np.zeros((nx, ny, nz, nreal), dtype=np.float64)
+
+    nparam_in_batch = (
+        nparam_per_layer * nlayer_per_batch
+    )  # For full sized batch of layers
+
+    nlayer_last_batch = nz - nbatch * nlayer_per_batch
+    if nlayer_last_batch > 0:
+        log_msg = f"Number of batches to update {field_param_name} is {nbatch + 1}"
+        logger.info(log_msg)
+    else:
+        log_msg = f"Number of batches to update {field_param_name} is {nbatch}"
+        logger.info(log_msg)
+
+    for batch_number in range(nbatch):
+        start_layer_number = batch_number * nlayer_per_batch
+        end_layer_number = start_layer_number + nlayer_per_batch
+
+        log_msg = (
+            f"Batch number: {batch_number}\n"
+            f"start layer : {start_layer_number}\n"
+            f"end layer   : {end_layer_number - 1}"
+        )
+        logger.info(log_msg)
+
+        X_batch = X_prior_3D[:, :, start_layer_number:end_layer_number, :].reshape(
+            (nparam_in_batch, nreal)
+        )
+        rho_3D_batch = np.zeros((nx, ny, nlayer_per_batch, nobs), dtype=np.float64)
+
+        # Copy rho calculated from one layer of 3D parameter into all layers for
+        # current batch of layers.
+        # Size of rho batch: (nx,ny,nlayer_per_batch,nobs)
+        rho_3D_batch[:, :, :, :] = rho_2D[:, :, np.newaxis, :]
+        rho_batch = rho_3D_batch.reshape((nparam_in_batch, nobs))
+
+        log_msg = f"Assimilate batch number {batch_number}"
+        logger.info(log_msg)
+        X_post_batch = distance_based_esmda_smoother.assimilate_batch(
+            X_batch=X_batch, Y=Y, rho_batch=rho_batch
+        )
+        X_post_3D[:, :, start_layer_number:end_layer_number, :] = X_post_batch.reshape(
+            nx, ny, nlayer_per_batch, nreal
+        )
+
+    if nlayer_last_batch > 0:
+        batch_number = nbatch
+        start_layer_number = batch_number * nlayer_per_batch
+        end_layer_number = start_layer_number + nlayer_last_batch
+        nparam_in_last_batch = nparam_per_layer * nlayer_last_batch
+
+        log_msg = f"Batch number: {batch_number}\n"
+        log_msg += f"start layer : {start_layer_number}\n"
+        log_msg += f"end layer   : {end_layer_number - 1}"
+        logger.info(log_msg)
+
+        X_batch = X_prior_3D[:, :, start_layer_number:end_layer_number, :].reshape(
+            (nparam_in_last_batch, nreal)
+        )
+
+        rho_3D_batch = np.zeros((nx, ny, nlayer_last_batch, nobs), dtype=np.float64)
+        # Copy rho calculated from one layer of 3D parameter into all layers for
+        # current batch of layers
+        # Size of rho batch: (nx,ny,nlayer_per_batch,nobs)
+        rho_3D_batch[:, :, :, :] = rho_2D[:, :, np.newaxis, :]
+        rho_batch = rho_3D_batch.reshape((nparam_in_last_batch, nobs))
+
+        log_msg = f"Assimilate batch number {batch_number}"
+        logger.info(log_msg)
+        X_post_batch = distance_based_esmda_smoother.assimilate_batch(
+            X_batch=X_batch, Y=Y, rho_batch=rho_batch
+        )
+        X_post_3D[:, :, start_layer_number:end_layer_number, :] = X_post_batch.reshape(
+            nx, ny, nlayer_last_batch, nreal
+        )
+
+    return X_post_3D
+
+
+def update_2D_field_with_distance_esmda(
+    distance_based_esmda_smoother: DistanceESMDA,
+    field_param_name: str,
+    X_prior: npt.NDArray[np.float64],
+    Y: npt.NDArray[np.float64],
+    rho_2D: npt.NDArray[np.float64],
+    nx: int,
+    ny: int,
+) -> npt.NDArray[np.float64]:
+    """
+    Calculate posterior update with distance-based ESMDA for one 2D parameter
+    The input rho_2D contains the values for RHO matrix.
+    Result is posterior parameter matrices of the 2D field.
+
+    Args:
+        distance_based_esmda_smooter: Object of DistanceESMDA class initialized for use
+        field_param_name: Name of 2D parameter
+        X_prior: Matrix with prior realizations of all field parameters,
+                 shape=(nparameters, nrealizations)
+        Y: Matrix with response values for each observations for each realization,
+                 shape=(nobservations, nrealizations)
+        rho_2D: RHO matrix elements for 2D grid with size (nx, ny),
+                 shape=(nx,ny,nobservations)
+        nx, ny: Dimensions of the 2D grid filled with a 2D field parameter.
+
+    Results:
+        X_post_2D: Posterior ensemble of 2D field parameter,
+          shape=(nparameters, nrealizations) where nparameters = nx*ny
+    """
+
+    nobs = Y.shape[0]
+    assert X_prior.shape[0] == nx * ny
+
+    # Test on memory also here in case this is a very big 2D surface
+    # Will fail if size of K and RHO matrix in bytes, which is 2 * nx * ny * nobs * 8,
+    # is larger than 80% of available memory
+    _calc_max_number_of_layers_per_batch_for_distance_localization(
+        nx, ny, 1, nobs, bytes_per_float=8
+    )  # use float64
+
+    log_msg = f"Assimilate 2D field parameter {field_param_name}"
+    logger.info(log_msg)
+
+    X_post = distance_based_esmda_smoother.assimilate_batch(
+        X_batch=X_prior, Y=Y, rho_batch=rho_2D
+    )
+    # Shape of X_post is (nx*ny, nrealization)
+    return X_post
