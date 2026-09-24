@@ -19,22 +19,23 @@ The Drogon case was run with ES-MDA using the august 2026 version of ERT and the
 runs with ERT using ES-MDA with 3 updates and 100 realizations are used, one without
 localization and with adaptive and distance-based localization. Adaptive localization used default threshold
 for correlation. The ensemble mean and standard deviation and the differences between the posterior
-and prior mean and standard deviations of one of thw Gaussian fieldso from Drogon is shown for one layer
+and prior mean and standard deviations of one of the Gaussian fields from Drogon is shown for one layer
 in one of the zones. The field statistics (mean, stdev) is calculated within
-the help grid used for the field parameter (Ertbox help grid).
+the help grid used for the field parameter (Ertbox help grid). The difference between posterior and prior mean
+and standard deviation with and without localization clearly shows the effect of using localization.
 
-The first plot show ensemble mean for the prior and the three different update strategies (global, adaptive, distance).
+The first plot shows ensemble mean for the prior and the three different update strategies (global, adaptive, distance).
 
 .. image:: ensemble_mean.png
 
-The second plot show the differences between posterior and prior ensemble mean for the three different update strategies.
+The second plot shows the differences between posterior and prior ensemble mean for the three different update strategies.
 
 .. image:: diff_posterior_prior_ensemble_mean.png
 
-The third plot show the ensemble standard deviation for the prior and the three different update strategies.
+The third plot shows the ensemble standard deviation for the prior and the three different update strategies.
 
 .. image:: ensemble_stdev.png
 
-The fourth plot show the differences between posterior and prior ensemble standard deviation for the three different update strategies.
+The fourth plot shows the differences between posterior and prior ensemble standard deviation for the three different update strategies.
 
 .. image:: diff_posterior_prior_ensemble_stdev.png
