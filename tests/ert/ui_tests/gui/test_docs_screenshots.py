@@ -21,7 +21,7 @@ from ert.gui.tools.load_results import LoadResultsPanel
 from ert.run_models import EnsembleExperiment, EnsembleSmoother, RunModel
 from ert.services import ErtServerController
 from ert.storage import open_storage
-from tests.ert.handle_run_path_dialog import handle_run_path_dialog
+from tests.ert.handle_runpath_dialog import handle_runpath_dialog
 from tests.ert.ui_tests.gui.conftest import open_gui_with_config
 
 from .conftest import get_child, wait_for_child
@@ -44,6 +44,11 @@ PNGS_NOT_APPLICABLE_FOR_GENERATION = [
     "docs/ert/getting_started/updating_parameters/fig/prior_response.png",
     "docs/ert/getting_started/updating_parameters/fig/prior_params.png",
     "docs/everest/images/*",
+    "docs/ert/getting_started/howto/illustrating_influence_range.png",
+    "docs/ert/getting_started/howto/ensemble_mean.png",
+    "docs/ert/getting_started/howto/ensemble_stdev.png",
+    "docs/ert/getting_started/howto/diff_posterior_prior_ensemble_mean.png",
+    "docs/ert/getting_started/howto/diff_posterior_prior_ensemble_stdev.png",
 ]
 
 
@@ -111,7 +116,7 @@ def run_experiment(
     def handle_dialog() -> None:
         QTimer.singleShot(
             500,
-            lambda: handle_run_path_dialog(gui, qtbot, delete_run_path=False),
+            lambda: handle_runpath_dialog(gui, qtbot, delete_runpath=False),
         )
 
     if experiment_mode.name() not in {"Ensemble experiment", "Evaluate ensemble"}:
@@ -167,15 +172,17 @@ class GuiEvaluator:
             else 0
         )
 
+        tmp_img_storage = Path("/tmp/test_docs_screenshots") / self.example_folder
+        tmp_img_storage.mkdir(exist_ok=True, parents=True)
+        generated_image_path = tmp_img_storage / img_name
         if ssim_score < threshold:
-            tmp_img_storage = Path("/tmp/test_docs_screenshots") / self.example_folder
-            tmp_img_storage.mkdir(exist_ok=True, parents=True)
-            generated_image_path = tmp_img_storage / img_name
             shutil.copy(temp_image_path, generated_image_path)
             self.gui_changed.append(
                 f"{image_path} SSIM:{ssim_score} < Threshold:{threshold} "
                 f"(generated image saved to {generated_image_path})"
             )
+        else:
+            shutil.copy(baseline_path, generated_image_path)
 
         temp_image_path.unlink()
 
@@ -379,10 +386,10 @@ def test_that_load_results_manually_screenshot_is_up_to_date(
         dialog = wait_for_child(gui, qtbot, ClosableDialog)
         panel = get_child(dialog, LoadResultsPanel)
 
-        run_path_edit = get_child(panel, TextBox, name="runpath_edit_lrm")
+        runpath_edit = get_child(panel, TextBox, name="runpath_edit_lrm")
         current_directory = str(Path.cwd())
-        run_path_edit.setText(run_path_edit.get_text.replace(current_directory, "."))
-        run_path_edit.clearFocus()
+        runpath_edit.setText(runpath_edit.get_text.replace(current_directory, "."))
+        runpath_edit.clearFocus()
 
         gui_evaluator.compare_img_with_gui(
             "load_results_manually.png",

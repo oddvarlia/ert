@@ -27,6 +27,109 @@
 Highlighted changes
 ===================
 
+Version 26.0
+------------
+
+Updated Analysis Panel
+######################
+
+The "Analysis module" entry in the experiment panel has been renamed to "Update settings". In the corresponding panel, you can now change
+the update strategies for each parameter type. Any changes will override the settings provided in the configuration file.
+
+
+.. image:: images/update_strategies_panel.png
+
+
+Waterfall Plot for EnIF updated parameters
+##########################################
+
+The plot uses Kalman-gain blob data (blob files in storage) to show each observation's
+contribution from the prior to the posterior value for a selected parameter.
+The contributions are split into prior, top observation contributions, summation of the rest
+and residual contribution. In case of GEN_OBS it appends the index to the
+observation name to distinguish between them.
+
+The following example shows the Ensemble Information Filter Plot for parameters updated
+by EnIF on polynomial case.
+
+.. image:: images/v26/enif_plot_poly.png
+
+
+RFT QC Tool
+###########
+
+When using the :ref:`RFT_OBSERVATION <rft_observation>` keyword to condition on
+RFT data, and/or the :ref:`RFT <rft>` keyword to
+load data from RFT files, a quality control widget is available to inspect
+RFT observations and responses. See: :ref:`Inspecting RFT observations and responses <rft_qc_tool>`
+for details.
+
+New distribution visualization
+##############################
+
+.. image:: images/v25/dist_plot_all_options.png
+
+The Distribution plot now combines histograms, estimated density curves and
+individual data points in a single figure. This makes it easier to compare
+parameter distributions across ensembles and see both the overall distribution
+and the individual realization values.
+
+.. image:: images/v25/dist_plot_dist_options.png
+
+All three views are enabled by default. You can show or hide each view
+independently in the **Distribution options** section of the right sidepanel.
+
+This replaces the standalone Gaussian KDE plot. The separate Histogram plot
+remains available for categorical data.
+
+Histogram
+~~~~~~~~~
+
+.. image:: images/v25/dist_plot_histogram.png
+
+Groups values into intervals, with bar heights showing the number of
+realizations in each interval. Histograms from different ensembles overlap
+in the same plot, rather than appearing in separate plots stacked vertically.
+
+Comparing too many ensembles at once can make the overlapping histograms
+difficult to distinguish. Select fewer ensembles or hide the histogram
+to make the comparison clearer.
+
+Estimated density
+~~~~~~~~~~~~~~~~~
+
+.. image:: images/v25/dist_plot_gkde.png
+
+Shows a smooth estimate of each ensemble's distribution using a Gaussian
+kernel density estimate (KDE). The curves help reveal the shape and spread
+of the parameter values.
+
+This is the same type of visualization as the previous Gaussian KDE plot,
+but it can now be shown alongside histograms and individual data points.
+When both histogram and density are enabled, estimated density is shown
+on the left vertical axis and histogram counts on the right.
+
+Individual data points
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. image:: images/v25/dist_plot_individual.png
+
+Shows each realization's value as a short vertical mark, with a separate
+row for each ensemble. This makes it easier to see clusters, gaps and
+outlying values. Marks may overlap where values are close together.
+
+The points appear below the histogram and density curves, sharing the
+same horizontal scale. If both other views are disabled, the individual
+data points are displayed on their own.
+
+
+Seismic data support
+####################
+
+Initial support for seismic data type has been added. This feature is currently in early
+access and functionality is subject to change based on user feedback. See the
+:ref:`seismic data type documentation <seismic_datatype>` for details on usage.
+
 Version 25.0
 ------------
 

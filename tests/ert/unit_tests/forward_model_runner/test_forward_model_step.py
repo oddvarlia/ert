@@ -93,7 +93,7 @@ def test_memory_usage_counts_grandchildren():
 
     def max_memory_per_subprocess_layer(layers: int) -> int:
         # Remove stale synchronization files
-        for stale in Path(".").glob("ready_*"):
+        for stale in Path().glob("ready_*"):
             stale.unlink()
         Path("release").unlink(missing_ok=True)
 
@@ -221,8 +221,7 @@ def test_run_with_empty_executable():
     empty_executable = Path.cwd() / "foo"
     with empty_executable.open("a", encoding="utf-8"):
         pass
-    st = os.stat(empty_executable)
-    empty_executable.chmod(st.st_mode | stat.S_IEXEC)
+    empty_executable.chmod(empty_executable.stat().st_mode | stat.S_IEXEC)
 
     fmstep = ForwardModelStep(
         {

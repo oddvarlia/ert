@@ -16,15 +16,13 @@ from opentelemetry.trace import Status, StatusCode
 
 from _ert.threading import ErtThread
 from ert.config import QueueSystem
-from ert.services import create_ertserver_client
+from ert.services.ert_client import ErtClient
 from ert.storage.local_experiment import ExperimentState
 from ert.trace import trace
 from ert.utils import makedirs_if_needed
 from everest.config import EverestConfig, ServerConfig
-from everest.detached import (
-    start_experiment,
+from everest.everserver import (
     start_server,
-    wait_for_server,
 )
 from everest.strings import EVEREST
 from everest.util import (
@@ -36,12 +34,17 @@ from .utils import (
     get_experiment_status,
     handle_keyboard_interrupt,
     remove_show_scaling_warning_setting,
-    run_detached_monitor,
-    run_empty_detached_monitor,
+    run_empty_server_monitor,
+    run_server_monitor,
     setup_logging,
 )
 
 logger = logging.getLogger(__name__)
+
+MAX_EVERSERVER_PENDING_TIME = 30 * 60  # 30 minutes
+
+# Measured from process startup to everserver is answering endpoints:
+MAX_EVERSERVER_READY_TIME = 10 * 60  # 10 minutes
 
 
 def everest_entry(args: list[str] | None = None) -> None:
@@ -67,7 +70,7 @@ def everest_entry(args: list[str] | None = None) -> None:
         )
 
         simulator_info_str = (
-            "The experiment server will submit the ERT forward model to run on "
+            "The experiment server will submit the forward model to run on "
         ) + (
             f"this machine ({client_machine_hostname})"
             if simulator_queue_system == QueueSystem.LOCAL
@@ -98,10 +101,16 @@ def everest_entry(args: list[str] | None = None) -> None:
         if threading.current_thread() is threading.main_thread():
             signal.signal(
                 signal.SIGINT,
-                partial(handle_keyboard_interrupt, options=options),
+                partial(signal.default_int_handler),
             )
 
-        asyncio.run(run_everest(options))
+        async def run_with_interrupt_handler() -> None:
+            try:
+                await run_everest(options)
+            except KeyboardInterrupt:
+                handle_keyboard_interrupt(signal.SIGINT, None, options)
+
+        asyncio.run(run_with_interrupt_handler())
 
 
 def _build_args_parser() -> argparse.ArgumentParser:
@@ -163,22 +172,13 @@ def _build_args_parser() -> argparse.ArgumentParser:
 
 async def run_everest(options: argparse.Namespace) -> None:
 
-    try:
-        create_ertserver_client(
-            Path(ServerConfig.get_session_dir(options.config.output_dir)), timeout=1
-        )
-        server_running = True
-    except TimeoutError:
-        server_running = False
-
-    if server_running:
-        config_file = options.config.config_file
+    if experiment_already_running(options):
         print(
             "An optimization is currently running.\n"
             "To monitor the running optimization use command:\n"
-            f"  `everest monitor {config_file}`\n"
+            f"  `everest monitor {options.config.config_file}`\n"
             "To kill the running optimization use command:\n"
-            f"  `everest kill {config_file}`"
+            f"  `everest kill {options.config.config_file}`"
         )
         return
 
@@ -213,66 +213,74 @@ async def run_everest(options: argparse.Namespace) -> None:
 
     logging_level = logging.DEBUG if options.debug else options.config.logging_level
 
-    print("Adding everest server to queue ...")
-    logger.debug("Submitting everserver")
+    submit_msg = (
+        "Submitting Everest server to the "
+        f"{options.config.server.queue_system.name} queue ..."
+    )
+    print(submit_msg)
+    logger.info(submit_msg)
+    pend_start_time: float = time.monotonic()
     try:
         await asyncio.wait_for(
-            start_server(options.config, logging_level), timeout=1800
-        )  # 30 minutes
-        logger.debug("Everserver submitted and started")
+            start_server(options.config, logging_level),
+            timeout=MAX_EVERSERVER_PENDING_TIME,
+        )
     except TimeoutError as e:
-        logger.error("Everserver failed to start within timeout")
-        raise SystemExit("Failed to start the server") from e
+        timeout_msg = (
+            "Everserver failed to start within the timeout "
+            f"({MAX_EVERSERVER_PENDING_TIME / 60:g} minutes)"
+        )
+        logger.error(timeout_msg)
+        raise SystemExit(timeout_msg) from e
+    if options.config.server.queue_system.name != QueueSystem.LOCAL:
+        start_msg = (
+            "Everserver started, pending time was "
+            f"{time.monotonic() - pend_start_time:g} seconds"
+        )
+        logger.info(start_msg)
+        print(start_msg)
 
-    print("Waiting for server ...")
-    logger.debug("Waiting for response from everserver")
+    print("Waiting for server to be ready...")
+    logger.debug(
+        f"Waiting up to {MAX_EVERSERVER_READY_TIME} "
+        "seconds for response from everserver"
+    )
     wait_start_time: float = time.monotonic()
-    client = create_ertserver_client(
+    client = ErtClient.get_client(
         Path(ServerConfig.get_session_dir(options.config.output_dir))
     )
-    wait_for_server(client, timeout=600)
-    print("EVEREST server found!")
+    client.wait_for_server(timeout=MAX_EVERSERVER_READY_TIME)
+    print("Everest server ready - starting experiment")
     logger.info(
         "Got response from everserver after "
         f"waiting for {time.monotonic() - wait_start_time:g} seconds. "
         "Starting experiment"
     )
-
-    experiment_id = start_experiment(
-        server_context=ServerConfig.get_server_context_from_conn_info(client.conn_info),
-        config=options.config,
-    )
+    experiment_id = client.start_experiment(config_dict)
 
     # blocks until the run is finished
     if options.gui:
         from everest.gui.main import run_gui  # ruff: ignore[import-outside-top-level]
 
         monitor_thread = ErtThread(
-            target=run_empty_detached_monitor
+            target=run_empty_server_monitor
             if options.disable_monitoring
-            else run_detached_monitor,
+            else run_server_monitor,
             name="EVEREST CLI monitor thread",
-            args=[
-                ServerConfig.get_server_context_from_conn_info(client.conn_info),
-                experiment_id,
-            ],
+            args=[client, experiment_id],
             daemon=True,
         )
         monitor_thread.start()
         run_gui(options.config.output_dir)
         monitor_thread.join()
     elif options.disable_monitoring:
-        run_empty_detached_monitor(
-            server_context=ServerConfig.get_server_context_from_conn_info(
-                client.conn_info
-            ),
+        run_empty_server_monitor(
+            client=client,
             experiment_id=experiment_id,
         )
     else:
-        run_detached_monitor(
-            server_context=ServerConfig.get_server_context_from_conn_info(
-                client.conn_info
-            ),
+        run_server_monitor(
+            client=client,
             experiment_id=experiment_id,
         )
 
@@ -293,6 +301,18 @@ async def run_everest(options: argparse.Namespace) -> None:
         )
         logger.info(msg)
         print(msg)
+
+
+def experiment_already_running(options: argparse.Namespace) -> bool:
+    try:
+        _ = ErtClient.get_client(
+            Path(ServerConfig.get_session_dir(options.config.output_dir)),
+            connect_timeout=1,
+        )
+    except TimeoutError:
+        return False
+    else:
+        return True
 
 
 def warn_user_that_runpath_is_nonempty() -> None:

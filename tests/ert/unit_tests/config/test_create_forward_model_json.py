@@ -1,6 +1,5 @@
 import copy
 import logging
-import os
 import stat
 from pathlib import Path
 from textwrap import dedent
@@ -151,11 +150,9 @@ def _generate_step(
         elif val is not None:
             config_contents += f"{key} {val}\n"
 
-    with Path(executable).open("w", encoding="utf-8"):
-        pass
-    mode = os.stat(executable).st_mode
-    mode |= stat.S_IXUSR | stat.S_IXGRP
-    Path(executable).chmod(stat.S_IMODE(mode))
+    exe = Path(executable)
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
 
     return forward_model_step_from_config_contents(config_contents, config_file, name)
 
@@ -563,7 +560,7 @@ def test_forward_model_job(job, forward_model, expected_args):
 
 @pytest.mark.usefixtures("use_tmpdir")
 def test_that_config_path_is_the_directory_of_the_main_ert_config():
-    os.mkdir("jobdir")
+    Path("jobdir").mkdir()
     Path("jobdir/job_file").write_text(
         dedent(
             """

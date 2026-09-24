@@ -200,8 +200,6 @@ class UpdateRunModelConfig(RunModelConfig):
 
 
 class EnsembleSmootherConfig(InitialEnsembleRunModelConfig, UpdateRunModelConfig):
-    experiment_type: ExperimentType = ExperimentType.ENSEMBLE_SMOOTHER
-
     def to_experiment_config(self) -> ExperimentConfig:
         return {
             **self._initial_ensemble_experiment_config(),
@@ -214,8 +212,6 @@ class EnsembleSmootherConfig(InitialEnsembleRunModelConfig, UpdateRunModelConfig
 class EnsembleInformationFilterConfig(
     InitialEnsembleRunModelConfig, UpdateRunModelConfig
 ):
-    experiment_type: ExperimentType = ExperimentType.ENSEMBLE_INFORMATION_FILTER
-
     def to_experiment_config(self) -> ExperimentConfig:
         return {
             **self._initial_ensemble_experiment_config(),
@@ -240,7 +236,6 @@ class EnsembleExperimentConfig(InitialEnsembleRunModelConfig):
 
 
 class EvaluateEnsembleConfig(RunModelConfig):
-    experiment_type: ExperimentType = ExperimentType.EVALUATE_ENSEMBLE
     ensemble_id: str
     supports_rerunning_failed_realizations: ClassVar[bool] = True
     shape_registry: ShapeRegistry | None = None
@@ -260,7 +255,6 @@ EverestResponseTypesAdapter = TypeAdapter(  # type: ignore
 class EverestRunModelConfig(RunModelConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    experiment_type: ExperimentType = ExperimentType.EVEREST
     optimization_output_dir: str
     simulation_dir: str
 
@@ -299,11 +293,16 @@ class EverestRunModelConfig(RunModelConfig):
 
 
 class ManualUpdateConfig(UpdateRunModelConfig):
-    experiment_type: ExperimentType = ExperimentType.MANUAL_UPDATE
     ensemble_id: str
     ert_templates: list[tuple[str, str]]
     shape_registry: ShapeRegistry | None = None
     experiment_name: str
+    parameter_configuration: list[
+        Annotated[
+            (GenKwConfig | SurfaceConfig | FieldConfig | EverestControl),
+            Field(discriminator="type"),
+        ]
+    ]
 
     def to_experiment_config(
         self, *, prior_experiment_config: ExperimentConfig
@@ -315,9 +314,9 @@ class ManualUpdateConfig(UpdateRunModelConfig):
             "ensemble_id": self.ensemble_id,
             "ert_templates": self.ert_templates,
             **self._update_experiment_config(),
-            "parameter_configuration": prior_experiment_config.get(
-                "parameter_configuration", []
-            ),
+            "parameter_configuration": [
+                param.model_dump(mode="json") for param in self.parameter_configuration
+            ],
             "response_configuration": prior_experiment_config.get(
                 "response_configuration", []
             ),
@@ -334,7 +333,6 @@ class ManualUpdateConfig(UpdateRunModelConfig):
 class MultipleDataAssimilationConfig(
     InitialEnsembleRunModelConfig, UpdateRunModelConfig
 ):
-    experiment_type: ExperimentType = ExperimentType.ES_MDA
     prior_ensemble_id: str | None
     arg_weights: str | None = Field(default=None, exclude=True)
 

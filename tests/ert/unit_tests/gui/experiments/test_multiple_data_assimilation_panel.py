@@ -1,6 +1,5 @@
-import math
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from PyQt6.QtCore import Qt, QTimer
@@ -17,6 +16,7 @@ from pytestqt.qtbot import QtBot
 from ert.config import EnsembleConfig
 from ert.config.analysis_config import AnalysisConfig
 from ert.config.analysis_module import ESSettings
+from ert.config.parameter_config import LocalizationType, ParameterConfig
 from ert.gui.ertnotifier import ErtNotifier
 from ert.gui.ertwidgets import EnsembleSelector, StringBox
 from ert.gui.experiments.multiple_data_assimilation_panel import (
@@ -31,6 +31,84 @@ from .conftest import (
 )
 
 
+@pytest.mark.parametrize(
+    ("update_strategy", "expected_valid"),
+    [
+        pytest.param(LocalizationType.GLOBAL, True, id="updatable"),
+        pytest.param(None, False, id="not_updatable"),
+    ],
+)
+def test_that_configuration_validity_reflects_updatable_parameters(
+    qtbot: QtBot, update_strategy, expected_valid
+):
+    notifier = ErtNotifier()
+    notifier._storage = MockStorage()
+
+    param_mock: ParameterConfig = Mock(
+        spec=ParameterConfig, update_strategy=update_strategy
+    )
+    panel = MultipleDataAssimilationPanel(
+        analysis_config=AnalysisConfig(minimum_required_realizations=1),
+        parameter_configuration=[param_mock],
+        runpath="",
+        notifier=notifier,
+        active_realizations=[True],
+        config_num_realization=1,
+    )
+    qtbot.addWidget(panel)
+
+    assert panel.isConfigurationValid() is expected_valid
+
+
+@pytest.mark.parametrize(
+    ("prior_update_strategy", "expected_valid"),
+    [
+        pytest.param(None, False, id="prior_not_updatable"),
+        pytest.param(LocalizationType.GLOBAL, True, id="prior_updatable"),
+    ],
+)
+def test_that_configuration_validity_reflects_prior_ensemble_updatable_parameters(
+    qtbot: QtBot, prior_update_strategy, expected_valid
+):
+    notifier = ErtNotifier()
+    notifier._storage = MockStorage()
+    prior_param_mock: ParameterConfig = Mock(
+        spec=ParameterConfig, update_strategy=prior_update_strategy
+    )
+    notifier._storage._setup_mocked_run(
+        "mock_ensemble",
+        "mock_experiment",
+        [
+            REALIZATION_FINISHED_SUCCESSFULLY,
+        ],
+        experiment_type=ExperimentType.ES_MDA,
+        iteration=0,
+        parameter_configuration={"PARAMETER": prior_param_mock},
+    )
+
+    param_mock: ParameterConfig = Mock(spec=ParameterConfig, update_strategy=None)
+    panel = MultipleDataAssimilationPanel(
+        analysis_config=AnalysisConfig(minimum_required_realizations=1),
+        parameter_configuration=[param_mock],
+        runpath="",
+        notifier=notifier,
+        active_realizations=[True],
+        config_num_realization=1,
+    )
+    qtbot.addWidget(panel)
+    assert not panel._selected_param_configuration_is_valid
+
+    select_prior_ensemble_checkbox = panel.findChild(
+        QCheckBox, "select_prior_checkbox_esmda"
+    )
+    assert not select_prior_ensemble_checkbox.isChecked()
+    select_prior_ensemble_checkbox.click()
+    assert select_prior_ensemble_checkbox.isChecked()
+
+    assert panel._selected_param_configuration_is_valid is expected_valid
+    assert panel.isConfigurationValid() is expected_valid
+
+
 def test_that_active_realizations_selector_validates_with_ensemble_size_from_config(
     qtbot: QtBot,
 ) -> None:
@@ -43,10 +121,14 @@ def test_that_active_realizations_selector_validates_with_ensemble_size_from_con
     config_num_realizations = len(active_realizations)
     notifier = ErtNotifier()
     notifier._storage = MockStorage()
+
+    param_mock: ParameterConfig = Mock(
+        spec=ParameterConfig, update_strategy=LocalizationType.GLOBAL
+    )
     panel = MultipleDataAssimilationPanel(
         analysis_config=AnalysisConfig(minimum_required_realizations=1),
-        parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
+        parameter_configuration=[param_mock],
+        runpath="",
         notifier=notifier,
         active_realizations=active_realizations,
         config_num_realization=config_num_realizations,
@@ -77,6 +159,9 @@ def test_that_active_realizations_selector_validates_with_with_realizations_from
     active_realizations = [True] * config_num_realizations
     notifier = ErtNotifier()
     notifier._storage = MockStorage()
+    prior_param_mock: ParameterConfig = Mock(
+        spec=ParameterConfig, update_strategy=LocalizationType.GLOBAL
+    )
     notifier._storage._setup_mocked_run(
         "mock_ensemble",
         "mock_experiment",
@@ -90,11 +175,16 @@ def test_that_active_realizations_selector_validates_with_with_realizations_from
         ],
         experiment_type=ExperimentType.ES_MDA,
         iteration=0,
+        parameter_configuration={"PARAMETER": prior_param_mock},
+    )
+
+    param_mock: ParameterConfig = Mock(
+        spec=ParameterConfig, update_strategy=LocalizationType.GLOBAL
     )
     panel = MultipleDataAssimilationPanel(
         analysis_config=AnalysisConfig(minimum_required_realizations=1),
-        parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
+        parameter_configuration=[param_mock],
+        runpath="",
         notifier=notifier,
         active_realizations=active_realizations,
         config_num_realization=config_num_realizations,
@@ -136,7 +226,7 @@ def test_that_multiple_data_assimilation_panel_sets_active_realizations_to_initi
     mda_panel = MultipleDataAssimilationPanel(
         analysis_config=AnalysisConfig(minimum_required_realizations=1),
         parameter_configuration=MagicMock(),
-        run_path="",
+        runpath="",
         notifier=mock_notifier,
         active_realizations=active_realizations,
         config_num_realization=2,
@@ -159,7 +249,7 @@ def test_that_multiple_data_assimilation_panel_uses_config_weights(
             es_settings=ESSettings(weights="8, 4, 2, 1"),
         ),
         parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
+        runpath="",
         notifier=notifier,
         active_realizations=active_realizations,
         config_num_realization=len(active_realizations),
@@ -180,7 +270,7 @@ def test_that_multiple_data_assimilation_panel_shows_weight_mismatch_warning(
     panel = MultipleDataAssimilationPanel(
         analysis_config=AnalysisConfig(minimum_required_realizations=1),
         parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
+        runpath="",
         notifier=notifier,
         active_realizations=active_realizations,
         config_num_realization=len(active_realizations),
@@ -208,7 +298,7 @@ def test_that_multiple_data_assimilation_panel_no_warning_for_equivalent_weight_
     panel = MultipleDataAssimilationPanel(
         analysis_config=AnalysisConfig(minimum_required_realizations=1),
         parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
+        runpath="",
         notifier=notifier,
         active_realizations=active_realizations,
         config_num_realization=len(active_realizations),
@@ -231,7 +321,7 @@ def _open_and_capture_threshold(panel, qtbot):
     def inspect_and_close_dialog() -> None:
         nonlocal captured_value
         dialog = QApplication.activeModalWidget()
-        if isinstance(dialog, QDialog) and dialog.windowTitle() == "Edit variables":
+        if isinstance(dialog, QDialog) and dialog.windowTitle() == "Update settings":
             spinner = dialog.findChild(
                 QDoubleSpinBox, name="localization_correlation_threshold"
             )
@@ -246,39 +336,6 @@ def _open_and_capture_threshold(panel, qtbot):
 
     assert captured_value is not None
     return captured_value
-
-
-@pytest.mark.parametrize(
-    ("active_realizations", "expected_threshold"),
-    [
-        ([True], 1.0),
-        ([True, False, True, True, True, True, True, True], 1),
-        (
-            [False, True, True] * 5,
-            3 / math.sqrt(10),
-        ),
-        ([True, False] * 200, 3 / math.sqrt(200)),
-    ],
-)
-def test_that_analysis_module_edit_threshold_matches_expected_from_ensemble_size_via_ui(
-    qtbot: QtBot, active_realizations, expected_threshold
-) -> None:
-    notifier = ErtNotifier()
-    notifier._storage = MockStorage()
-
-    panel = MultipleDataAssimilationPanel(
-        analysis_config=AnalysisConfig(minimum_required_realizations=1),
-        parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
-        notifier=notifier,
-        active_realizations=active_realizations,
-        config_num_realization=len(active_realizations),
-    )
-    qtbot.addWidget(panel)
-
-    observed_threshold = _open_and_capture_threshold(panel, qtbot)
-
-    assert observed_threshold == pytest.approx(expected_threshold)
 
 
 @dataclass(frozen=True)
@@ -334,7 +391,7 @@ class EnsInfo:
         ),
     ],
 )
-def test_that_restart_ensemble_select_contains_elements(
+def test_that_prior_ensemble_selector_contains_only_eligible_ensembles(
     qtbot: QtBot, extra_ensembles, expected_ensembles
 ) -> None:
     config_num_realizations = 5
@@ -368,7 +425,7 @@ def test_that_restart_ensemble_select_contains_elements(
     panel = MultipleDataAssimilationPanel(
         analysis_config=AnalysisConfig(minimum_required_realizations=1),
         parameter_configuration=EnsembleConfig().parameter_configuration,
-        run_path="",
+        runpath="",
         notifier=notifier,
         active_realizations=active_realizations,
         config_num_realization=config_num_realizations,

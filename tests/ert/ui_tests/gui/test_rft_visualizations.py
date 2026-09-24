@@ -43,7 +43,7 @@ def write_egrid(path: Path):
 def rft_config(tmp_path: Path):
     num_realizations = 2
     for i in range(num_realizations):
-        runpath = tmp_path / "run_path" / f"realization-{i}"
+        runpath = tmp_path / "runpath" / f"realization-{i}"
         runpath.mkdir(parents=True)
         rft_file = runpath / "BASE.RFT"
         offset = i / 2
@@ -65,7 +65,7 @@ def rft_config(tmp_path: Path):
         {
             "NUM_REALIZATIONS": num_realizations,
             "ENSPATH": str(tmp_path / "storage"),
-            "RUNPATH": str(tmp_path / "run_path/realization-<IENS>"),
+            "RUNPATH": str(tmp_path / "runpath" / "realization-<IENS>"),
             "ECLBASE": "BASE",
             "OBS_CONFIG": (
                 "obs_config",
@@ -89,14 +89,18 @@ def rft_config(tmp_path: Path):
     )
 
 
-@pytest.fixture(
-    params=[
-        ("WELL:2000-01-01:PRESSURE", ENSEMBLE),
-        ("WELL:2000-01-01:PRESSURE", STATISTICS),
+@pytest.mark.mpl_image_compare(tolerance=10.0, style="default")
+@pytest.mark.skip_mac_ci  # test is slow
+@pytest.mark.parametrize(
+    ("key", "plot_name"),
+    [
+        pytest.param("WELL:2000-01-01:PRESSURE", ENSEMBLE, id="pressure-ensemble"),
+        pytest.param("WELL:2000-01-01:PRESSURE", STATISTICS, id="pressure-statistics"),
     ],
 )
-def plot_figure(qtbot: QtBot, request, rft_config: ErtConfig):
-    key, plot_name = request.param
+def test_that_all_rft_visualizations_are_unchanged(
+    qtbot: QtBot, rft_config: ErtConfig, key: str, plot_name: str
+):
     args_mock = Mock()
     open_storage(rft_config.ens_path, mode="r")
     log_handler = GUILogHandler()
@@ -133,6 +137,7 @@ def plot_figure(qtbot: QtBot, request, rft_config: ErtConfig):
                 case_selection.slot_toggle_plot(item)
 
         found_selected_key = False
+        figure = None
         for key_index in range(key_model.rowCount()):
             to_select = data_types.model.itemAt(data_types.model.index(key_index, 0))
             assert to_select is not None
@@ -149,20 +154,11 @@ def plot_figure(qtbot: QtBot, request, rft_config: ErtConfig):
                                 selected_key.dimensionality
                                 == tab._plotter.dimensionality
                             )
-                            yield tab._figure.figure
+                            figure = tab._figure.figure
                         else:
                             assert (
                                 selected_key.dimensionality
                                 != tab._plotter.dimensionality
                             )
         assert found_selected_key
-        plot_window.close()
-
-
-# We had an issue where the mpl_image_compare decorator
-# was put on an inner function. That makes any failure not
-# report so it has to be on a top level test.
-@pytest.mark.mpl_image_compare(tolerance=10.0, style="default")
-@pytest.mark.skip_mac_ci  # test is slow
-def test_that_all_rft_visualizations_are_unchanged(plot_figure):
-    return plot_figure
+    return figure

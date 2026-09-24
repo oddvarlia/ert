@@ -12,7 +12,6 @@ import time
 import uuid
 from collections.abc import Generator, Iterable, Sequence
 from dataclasses import dataclass, field
-from os import path
 from pathlib import Path
 from subprocess import Popen, run
 from typing import TYPE_CHECKING
@@ -164,13 +163,13 @@ class ForwardModelStep:
             stdin = None
 
         if self.std_err:
-            os.makedirs(path.dirname(path.abspath(self.std_err)), exist_ok=True)
+            Path(self.std_err).resolve().parent.mkdir(parents=True, exist_ok=True)
             stderr = open(self.std_err, "w", encoding="utf-8")  # ruff: ignore[builtin-open, open-file-with-context-handler]
         else:
             stderr = None
 
         if self.std_out:
-            os.makedirs(path.dirname(path.abspath(self.std_out)), exist_ok=True)
+            Path(self.std_out).resolve().parent.mkdir(parents=True, exist_ok=True)
             stdout = open(self.std_out, "w", encoding="utf-8")  # ruff: ignore[builtin-open, open-file-with-context-handler]
         else:
             stdout = None
@@ -414,11 +413,12 @@ class ForwardModelStep:
         """
 
         start_time = time.time()
+        target_path = Path(target_file)
         while True:
-            if Path(target_file).exists():
-                stat = os.stat(target_file)
-                if stat.st_mtime_ns > (existing_target_file_mtime or 0):
-                    return None
+            if target_path.exists() and target_path.stat().st_mtime_ns > (
+                existing_target_file_mtime or 0
+            ):
+                return None
 
             time.sleep(self.sleep_interval)
             if time.time() - start_time > timeout:
@@ -426,8 +426,8 @@ class ForwardModelStep:
 
         # We have gone out of the loop via the break statement,
         # i.e. on a timeout.
-        if Path(target_file).exists():
-            stat = os.stat(target_file)
+        if target_path.exists():
+            stat = target_path.stat()
             return (
                 f"The target file:{target_file} has not been updated; "
                 f"this is flagged as failure. mtime:{stat.st_mtime}   "
@@ -439,8 +439,7 @@ class ForwardModelStep:
 def _get_existing_target_file_mtime(file: str | None) -> int | None:
     mtime = None
     if file and Path(file).exists():
-        stat = os.stat(file)
-        mtime = stat.st_mtime_ns
+        mtime = Path(file).stat().st_mtime_ns
     return mtime
 
 

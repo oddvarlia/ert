@@ -10,7 +10,9 @@ from ert.config import (
     AnalysisConfig,
     ConfigValidationError,
     ConfigWarning,
+    EnsembleConfig,
     ErtConfig,
+    GenKwConfig,
     ModelConfig,
     ObservationSettings,
 )
@@ -28,10 +30,24 @@ from ert.run_models import (
     model_factory,
 )
 from ert.run_models.model_factory import (
+    _resolve_parameter_configs,
     _setup_ensemble_information_filter,
     _setup_ensemble_smoother,
     _setup_multiple_data_assimilation,
 )
+
+
+def _gen_kw_config(name: str = "COEFFS") -> GenKwConfig:
+    return GenKwConfig(name=name, distribution={"name": "normal", "mean": 0, "std": 1})
+
+
+def _gen_kw_config_text(tmp_path, kw_name: str = "COEFFS") -> str:
+    """Writes a GEN_KW prior file to tmp_path and returns the corresponding
+    GEN_KW config line.
+    """
+    prior_file = tmp_path / "prior.txt"
+    prior_file.write_text(f"{kw_name} NORMAL 0 1", encoding="utf-8")
+    return f"GEN_KW KW_NAME {prior_file}"
 
 
 @pytest.mark.parametrize(
@@ -43,6 +59,7 @@ from ert.run_models.model_factory import (
 )
 def test_that_the_model_warns_when_active_realizations_less_min_realizations(
     mode,
+    tmp_path,
     change_to_tmpdir,
 ):
     """
@@ -59,9 +76,10 @@ def test_that_the_model_warns_when_active_realizations_less_min_realizations(
     ):
         _ = model_factory.create_model(
             ErtConfig.from_file_contents(
-                """\
+                f"""\
                 NUM_REALIZATIONS 100
                 MIN_REALIZATIONS 10
+                {_gen_kw_config_text(tmp_path)}
                 """
             ),
             Namespace(
@@ -171,7 +189,9 @@ def test_setup_ensemble_experiment(tmp_path):
 @pytest.mark.filterwarnings("ignore:MIN_REALIZATIONS")
 def test_setup_ensemble_smoother(tmp_path):
     model = model_factory._setup_ensemble_smoother(
-        ErtConfig.from_file_contents(f"NUM_REALIZATIONS 100\nENSPATH {tmp_path}"),
+        ErtConfig.from_file_contents(
+            f"NUM_REALIZATIONS 100\nENSPATH {tmp_path}\n{_gen_kw_config_text(tmp_path)}"
+        ),
         Namespace(
             realizations="0-4,7,8",
             current_ensemble="default",
@@ -193,7 +213,9 @@ def test_that_setup_multiple_data_assimilation_uses_the_arguments_from_the_cli(
     tmp_path,
 ):
     model = model_factory._setup_multiple_data_assimilation(
-        ErtConfig.from_file_contents(f"NUM_REALIZATIONS 100\nENSPATH {tmp_path}"),
+        ErtConfig.from_file_contents(
+            f"NUM_REALIZATIONS 100\nENSPATH {tmp_path}\n{_gen_kw_config_text(tmp_path)}"
+        ),
         Namespace(
             realizations="0-4,8",
             weights="6,4,2",
@@ -226,6 +248,7 @@ def test_that_setup_multiple_data_assimilation_uses_config_weights_when_cli_omit
             NUM_REALIZATIONS 100
             ENSPATH {tmp_path}
             ANALYSIS_SET_VAR STD_ENKF WEIGHTS 8, 4, 2, 1
+            {_gen_kw_config_text(tmp_path)}
             """
         ),
         Namespace(
@@ -243,7 +266,7 @@ def test_that_setup_multiple_data_assimilation_uses_config_weights_when_cli_omit
 
 
 @pytest.mark.parametrize(
-    ("restart_from_iteration", "expected_path"),
+    ("prior_iteration", "expected_path"),
     [
         (
             0,
@@ -269,14 +292,14 @@ def test_that_setup_multiple_data_assimilation_uses_config_weights_when_cli_omit
         (3, []),
     ],
 )
-def test_multiple_data_assimilation_restart_paths(
-    tmp_path, monkeypatch, restart_from_iteration, expected_path
+def test_that_multiple_data_assimilation_runpaths_start_after_prior_iteration(
+    tmp_path, monkeypatch, prior_iteration, expected_path
 ):
     monkeypatch.chdir(tmp_path)
     args = Namespace(
         realizations="0,1",
         weights="6,4,2",
-        target_ensemble="restart_case_%d",
+        target_ensemble="from_prior_%d",
         prior_ensemble_id=str(uuid1()),
         experiment_name="just_assimilatin",
     )
@@ -286,8 +309,14 @@ def test_multiple_data_assimilation_restart_paths(
         "validate_successful_realizations_count",
         MagicMock(),
     )
+    monkeypatch.setattr(
+        ert.run_models.model_factory,
+        "validate_has_updatable_parameter",
+        lambda parameter_configs: None,
+    )
+
     ensemble_mock = MagicMock()
-    ensemble_mock.iteration = restart_from_iteration
+    ensemble_mock.iteration = prior_iteration
     config = ErtConfig(runpath_config=ModelConfig(num_realizations=2))
 
     with patch(
@@ -313,7 +342,7 @@ def test_num_realizations_specified_incorrectly_raises(analysis_mode):
     args = Namespace(
         realizations="0",
         weights="6,4,2",
-        target_ensemble="restart_case_%d",
+        target_ensemble="from_prior_%d",
         prior_ensemble_id=str(uuid1()),
         experiment_name=None,
     )
@@ -396,3 +425,55 @@ def test_that_setting_up_experiment_with_update_step_raises_config_validation_er
         match="Number of active realizations must be at least 2 for an update step",
     ):
         experiment_setup_method(config, args, MagicMock(), MagicMock())
+
+
+@pytest.mark.parametrize("has_parameters", [False, True], ids=["empty", "all-disabled"])
+def test_that_prior_ensemble_allows_current_config_without_updatable_parameters(
+    has_parameters: bool,
+):
+    parameter = _gen_kw_config()
+    parameter.update_strategy = None
+    config = ErtConfig(
+        ensemble_config=EnsembleConfig(
+            parameter_configs={parameter.name: parameter} if has_parameters else {}
+        )
+    )
+
+    parameter_configs, design_matrix_dict = _resolve_parameter_configs(
+        config, prior_ensemble=str(uuid1())
+    )
+
+    assert parameter_configs == config.ensemble_config.parameter_configuration
+    assert design_matrix_dict is None
+
+
+@pytest.mark.filterwarnings("ignore:MIN_REALIZATIONS")
+@pytest.mark.parametrize(
+    "experiment_setup_method",
+    [
+        _setup_multiple_data_assimilation,
+        _setup_ensemble_smoother,
+        _setup_ensemble_information_filter,
+    ],
+)
+def test_that_setting_up_experiment_with_update_step_raises_config_validation_error_given_no_parameters_configured(  # ruff: ignore[line-too-long]
+    experiment_setup_method, tmp_path
+):
+    config = ErtConfig.from_file_contents(f"NUM_REALIZATIONS 100\nENSPATH {tmp_path}")
+    args = Namespace(
+        realizations="0-4",
+        weights="2,3",
+        target_ensemble="test_case_%d",
+        prior_ensemble_id=None,
+        experiment_name="experiment",
+        starting_iteration=0,
+    )
+
+    with pytest.raises(
+        ConfigValidationError,
+        match="No parameters to update as no GEN_KW, FIELD or SURFACE "
+        "parameters are configured!",
+    ):
+        experiment_setup_method(
+            config, args, ObservationSettings(), queue.SimpleQueue()
+        )

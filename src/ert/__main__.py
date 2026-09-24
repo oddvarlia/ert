@@ -451,26 +451,38 @@ def get_ert_parser(parser: ArgumentParser | None = None) -> ArgumentParser:
         type=valid_name,
         default=None,
         action=DeprecatedAction,
-        dest="restart_ensemble_id",
+        alternative_option="--prior-ensemble-id",
+        dest="prior_ensemble_id",
         help="Deprecated: This argument is deprecated and will be "
-        "removed in future versions. Use --restart-ensemble instead.",
+        "removed in future versions. Use --prior-ensemble-id instead.",
     )
     es_mda_parser.add_argument(
         "--restart-ensemble",
         type=valid_name,
         default=None,
-        dest="restart_ensemble_id",
+        action=DeprecatedAction,
+        alternative_option="--prior-ensemble-id",
+        dest="prior_ensemble_id",
         help="Deprecated: This argument is deprecated and will be "
-        "removed in future versions. Use --restart-ensemble-id instead.",
+        "removed in future versions. Use --prior-ensemble-id instead.",
     )
     es_mda_parser.add_argument(
         "--restart-ensemble-id",
-        type=valid_name,  # validate UUID
+        type=valid_name,
         default=None,
-        dest="restart_ensemble_id",
-        help="UUID of the ensemble where the results for the experiment "
-        "using the prior parameters will be stored. Iteration number is read "
-        "from this ensemble. If provided this will be a restart a run",
+        action=DeprecatedAction,
+        alternative_option="--prior-ensemble-id",
+        dest="prior_ensemble_id",
+        help="Deprecated: This argument is deprecated and will be "
+        "removed in future versions. Use --prior-ensemble-id instead.",
+    )
+    es_mda_parser.add_argument(
+        "--prior-ensemble-id",
+        type=valid_name,
+        default=None,
+        help="UUID of an existing ensemble to run from as the prior. "
+        "Reuse its parameters, responses and observations, and continue "
+        "ES-MDA updates from its iteration in a new experiment.",
     )
     es_mda_parser.add_argument(
         "--experiment-name",
@@ -603,13 +615,13 @@ def main() -> None:
 
     args = ert_parser(None, sys.argv[1:])
 
-    log_dir = os.path.abspath(args.logdir)
+    log_dir = Path(args.logdir).resolve()
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        log_dir.mkdir(exist_ok=True, parents=True)
     except PermissionError as err:
         sys.exit(str(err))
 
-    os.environ["ERT_LOG_DIR"] = log_dir
+    os.environ["ERT_LOG_DIR"] = str(log_dir)
 
     config_dict = yaml.safe_load(Path(LOGGING_CONFIG).read_text(encoding="utf-8"))
     for handler_name, handler_config in config_dict["handlers"].items():

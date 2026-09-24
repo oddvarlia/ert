@@ -1248,22 +1248,16 @@ def test_that_seismic_observation_reads_boundary_file(file_context_token):
     ]
     boundary = shape_registry.get(0)
     assert isinstance(boundary, PolygonShapeConfig)
-    expected = [
-        (0.0, 0.0),
-        (0.0, 1.0),
-        (1.0, 1.0),
-        (1.0, 0.0),
-        (0.0, 0.0),
-    ]
-    assert boundary.vertices == expected
+    expected = PolygonShapeConfig(wkt="MULTIPOLYGON (((0 0, 0 1, 1 1, 1 0, 0 0)))")
+    assert boundary == expected
 
 
 @pytest.mark.usefixtures("use_tmpdir")
 def test_that_non_existent_boundary_seismic_observation_file_raises_error(
     file_context_token,
 ):
-    os.makedirs("directory/right/path", exist_ok=True)
-    os.makedirs("directory/wrong/path", exist_ok=True)
+    Path("directory/right/path").mkdir(exist_ok=True, parents=True)
+    Path("directory/wrong/path").mkdir(exist_ok=True, parents=True)
 
     write_default_seismic_file_content("directory/obs.csv")
 
@@ -1302,7 +1296,7 @@ def test_that_seismic_observation_filenames_can_be_glob_pattern(file_context_tok
     filename3 = ".surface--amplitude_full_mean_depth--20190701_20180101.csv.yml"
 
     directory = "dir1/dir2/.."
-    os.makedirs(directory, exist_ok=True)
+    Path(directory).mkdir(exist_ok=True, parents=True)
 
     for filename in [filename0, filename1, filename2, filename3]:
         write_default_seismic_file_content(f"{directory}/{filename}")

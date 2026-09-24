@@ -54,10 +54,6 @@ words = st.text(
 ).filter(lambda x: x != "SCRIPT")
 
 
-def touch(filename):
-    Path(filename).write_text(" ", encoding="utf-8")
-
-
 file_names = words
 format_result_file_name = st.builds(lambda file_name: file_name + "-%d", file_names)
 format_runpath_file_name = st.builds(
@@ -662,28 +658,25 @@ def config_generators(draw, use_eclbase=booleans):
             ]:
                 setattr(config_values, key, str(tmp / getattr(config_values, key)))
             for dirname in should_exist_directories:
-                if not os.path.isdir(dirname):
-                    os.mkdir(dirname)
+                if not Path(dirname).is_dir():
+                    Path(dirname).mkdir()
 
             for filename in should_exist_files:
                 if not Path(filename).is_file():
-                    touch(filename)
+                    Path(filename).touch()
 
             with Path(config_values.obs_config).open("w", encoding="utf-8") as fh:
                 for o in obs:
                     fh.write(as_obs_config_content(o))
                     fh.write("\n")
 
-            def make_executable(filename):
-                current_mode = os.stat(filename).st_mode
-                Path(filename).chmod(current_mode | stat.S_IEXEC)
-
             for job_file, executable_file in should_exist_job_configs:
                 path = Path(job_file).parent
-                if not os.path.isdir(path / "script"):
-                    os.mkdir(path / "script")
-                touch(path / "script" / executable_file)
-                make_executable(path / "script" / executable_file)
+                if not (path / "script").is_dir():
+                    (path / "script").mkdir()
+                exe = path / "script" / executable_file
+                exe.touch()
+                exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
                 Path(job_file).write_text(
                     f"EXECUTABLE script/{executable_file}\nMIN_ARG 0\nMAX_ARG 1\n",
                     encoding="utf-8",

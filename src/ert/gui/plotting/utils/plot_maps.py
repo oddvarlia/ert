@@ -3,11 +3,11 @@ from collections.abc import Callable
 from ert.gui.plotting.ert_plots import (
     CrossEnsembleStatisticsPlot,
     DistributionPlot,
-    GaussianKDEPlot,
     HistogramPlot,
     MisfitsPlot,
     StatisticsPlot,
     StdDevPlot,
+    WaterfallPlot,
 )
 from ert.gui.plotting.everest_plots import (
     EverestBatchObjectiveFunctionPlot,
@@ -27,6 +27,7 @@ HISTOGRAM = "Histogram"
 STATISTICS = "Statistics"
 STD_DEV = "Std dev"
 MISFITS = "Misfits"
+WATERFALL = "Waterfall"
 EVEREST_CONTROLS_PLOT = "Controls"
 EVEREST_GRADIENTS_PLOT = "Gradient"
 EVEREST_OBJECTIVE_FUNCTION_PLOT = "Objective function"
@@ -37,10 +38,10 @@ ERT_PLOT_MAP: dict[str, Callable[[], Plotter]] = {
     STATISTICS: StatisticsPlot,
     MISFITS: MisfitsPlot,
     HISTOGRAM: HistogramPlot,
-    GAUSSIAN_KDE: GaussianKDEPlot,
     DISTRIBUTION: DistributionPlot,
     CROSS_ENSEMBLE_STATISTICS: CrossEnsembleStatisticsPlot,
     STD_DEV: StdDevPlot,
+    WATERFALL: WaterfallPlot,
 }
 EVEREST_PLOT_MAP: dict[str, Callable[[], Plotter]] = {
     EVEREST_BATCH_OBJECTIVE_FUNCTION_PLOT: EverestBatchObjectiveFunctionPlot,

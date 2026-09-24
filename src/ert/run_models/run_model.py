@@ -39,11 +39,13 @@ from ert.config import (
     ConfigValidationError,
     DesignMatrix,
     HookedWorkflowFixtures,
+    HookRuntime,
     ModelConfig,
     ParameterConfig,
     PostSimulationFixtures,
     PreSimulationFixtures,
     QueueConfig,
+    Workflow,
     create_workflow_fixtures_from_hooked,
 )
 from ert.config.queue_config import KnownQueueOptionsAdapter
@@ -59,6 +61,7 @@ from ert.ensemble_evaluator.snapshot import EnsembleSnapshot
 from ert.ensemble_evaluator.state import (
     REALIZATION_STATE_FAILED,
     REALIZATION_STATE_FINISHED,
+    REALIZATION_STATE_UNKNOWN,
 )
 from ert.mode_definitions import MODULE_MODE
 from ert.run_arg import RunArg
@@ -74,15 +77,16 @@ from ert.storage import (
 from ert.trace import tracer
 from ert.utils import log_duration
 from ert.warnings import PostExperimentWarning, capture_specific_warning
-from ert.workflow_runner import WorkflowRunner
+from ert.workflow_runner import WorkflowJobStatus, WorkflowRunner
 
-from ._create_run_path import create_run_path
+from ._create_runpath import create_runpath
 from .event import (
     EndEvent,
     FullSnapshotEvent,
     SnapshotUpdateEvent,
     StartEvent,
     StatusEvents,
+    WorkflowEvent,
 )
 
 if TYPE_CHECKING:
@@ -112,9 +116,9 @@ class TooFewRealizationsSucceeded(ErtRunError):
         super().__init__(self.message)
 
 
-def delete_runpath(run_path: str) -> None:
-    if Path(run_path).exists():
-        shutil.rmtree(run_path)
+def delete_runpath(runpath: str) -> None:
+    if Path(runpath).exists():
+        shutil.rmtree(runpath)
 
 
 class _LogAggregration(logging.Handler):
@@ -175,11 +179,13 @@ class RunModel(RunModelConfig, ABC):
     _end_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _iter_snapshot: dict[int, EnsembleSnapshot] = PrivateAttr(default_factory=dict)
     _is_rerunning_failed_realizations: bool = PrivateAttr(False)
-    _run_paths: Runpaths = PrivateAttr()
+    _runpaths: Runpaths = PrivateAttr()
     _total_iterations: int = PrivateAttr(default=1)
     _start_iteration: int = PrivateAttr(default=0)
     _max_parallelism_violation: ParallelismViolation = ParallelismViolation()
     _workflow_runner: WorkflowRunner | None = PrivateAttr(default=None)
+    _workflow_run_id: uuid.UUID = PrivateAttr(default_factory=uuid.uuid4)
+    _pending_workflow_events: list[WorkflowEvent] = PrivateAttr(default_factory=list)
 
     def __init__(
         self,
@@ -203,7 +209,7 @@ class RunModel(RunModelConfig, ABC):
         self._rng = np.random.default_rng(self.random_seed)
         self._start_iteration = self.start_iteration
 
-        self._run_paths = Runpaths(
+        self._runpaths = Runpaths(
             jobname_format=self.runpath_config.jobname_format_string,
             runpath_format=self.runpath_config.runpath_format_string,
             filename=str(self.runpath_file),
@@ -231,7 +237,7 @@ class RunModel(RunModelConfig, ABC):
             "status_queue",
             "_storage",
             "rng",
-            "run_paths",
+            "runpaths",
             "substitutions",
         ]
         sensitive_keys = [
@@ -380,6 +386,8 @@ class RunModel(RunModelConfig, ABC):
             self.send_event(WarningEvent(msg=str(message)))
 
         start_timestamp = datetime.datetime.now(tz=datetime.UTC)
+        self._workflow_run_id = uuid.uuid4()
+        self._pending_workflow_events = []
         try:  # ruff: ignore[too-many-statements-in-try-clause]
             self.send_event(StartEvent(timestamp=start_timestamp))
             with (
@@ -484,7 +492,7 @@ class RunModel(RunModelConfig, ABC):
 
             if all_realizations:
                 for real in all_realizations.values():
-                    status[str(real["status"])] += 1
+                    status[str(real.get("status", REALIZATION_STATE_UNKNOWN))] += 1
 
         if self._is_rerunning_failed_realizations:
             status["Finished"] += (
@@ -702,8 +710,6 @@ class RunModel(RunModelConfig, ABC):
             self._max_parallelism_violation, evaluator.max_parallelism_violation
         )
 
-        logger.debug("tasks complete")
-
         if self._end_event.is_set():
             logger.debug("Run model cancelled - post evaluation")
             try:
@@ -763,27 +769,27 @@ class RunModel(RunModelConfig, ABC):
 
     @property
     def paths(self) -> list[str]:
-        run_paths = []
+        runpaths = []
         active_realizations = np.where(self.active_realizations)[0]
         for iteration in range(
             self._start_iteration,
             self._total_iterations + self._start_iteration,
         ):
-            run_paths.extend(self._run_paths.get_paths(active_realizations, iteration))
-        return run_paths
+            runpaths.extend(self._runpaths.get_paths(active_realizations, iteration))
+        return runpaths
 
     def check_if_runpath_exists(self) -> bool:
         """
-        Determine if the run_path exists by checking if it contains
+        Determine if the runpath exists by checking if it contains
         at least one iteration directory for the realizations in the active mask.
-        The run_path can contain one or two %d specifiers ie:
+        The runpath can contain one or two %d specifiers ie:
             "realization-%d/iter-%d/"
             "realization-%d/"
         """
-        return any(Path(run_path).exists() for run_path in self.paths)
+        return any(Path(runpath).exists() for runpath in self.paths)
 
     def get_number_of_existing_runpaths(self) -> int:
-        realization_set = {Path(run_path).parent for run_path in self.paths}
+        realization_set = {Path(runpath).parent for runpath in self.paths}
         return [real_path.exists() for real_path in realization_set].count(True)
 
     def get_number_of_active_realizations(self) -> int:
@@ -797,21 +803,19 @@ class RunModel(RunModelConfig, ABC):
         return self.active_realizations.count(True)
 
     @log_duration(logger, logging.INFO)
-    def rm_run_path(
+    def rm_runpath(
         self,
         progress_tracker: RunpathProgressWidget | None = None,
         progress_callback: Callable[[], None] | None = None,
     ) -> None:
-        run_paths = self.paths
+        runpaths = self.paths
         if progress_tracker is not None:
-            progress_tracker.start(len(run_paths))
+            progress_tracker.start(len(runpaths))
         if progress_callback is not None:
             progress_callback()
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(delete_runpath, run_path) for run_path in run_paths
-            ]
+            futures = [executor.submit(delete_runpath, runpath) for runpath in runpaths]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
                 if progress_tracker is not None:
@@ -833,23 +837,110 @@ class RunModel(RunModelConfig, ABC):
         self,
         fixtures: HookedWorkflowFixtures,
     ) -> None:
-        for workflow in self.hooked_workflows[fixtures.hook]:
-            workflow_runner = WorkflowRunner(
-                workflow=workflow,
-                fixtures=create_workflow_fixtures_from_hooked(fixtures),
-            )
-            self._workflow_runner = workflow_runner
-            try:
+        ensemble = getattr(fixtures, "ensemble", None)
+        experiment = ensemble.experiment if ensemble is not None else None
+        iteration = ensemble.iteration if ensemble is not None else None
+        try:
+            for workflow in self.hooked_workflows[fixtures.hook]:
                 if self._end_event.is_set():
-                    workflow_runner.cancel()
-                    raise UserCancelled("Experiment cancelled by user during workflows")
+                    # Cancel all remaining workflows
+                    self._send_cancelled_workflow_events(
+                        workflow=workflow,
+                        hook=fixtures.hook,
+                        iteration=iteration,
+                    )
+                    continue
 
-                workflow_runner.run_blocking()
-            finally:
-                self._workflow_runner = None
+                workflow_runner = WorkflowRunner(
+                    workflow=workflow,
+                    fixtures=create_workflow_fixtures_from_hooked(fixtures),
+                    hook=str(fixtures.hook),
+                )
+                self._workflow_runner = workflow_runner
+                try:
+                    workflow_runner.run_blocking()
+                finally:
+                    self._workflow_runner = None
+                    self._send_workflow_events(
+                        workflow_runner=workflow_runner,
+                        hook=fixtures.hook,
+                        workflow_name=workflow.name,
+                        iteration=iteration,
+                    )
+        finally:
+            self._persist_workflow_events_to_storage(experiment)
 
-            if self._end_event.is_set():
-                raise UserCancelled("Experiment cancelled by user during workflows")
+        if self._end_event.is_set():
+            raise UserCancelled("Experiment cancelled by user during workflows")
+
+    def _send_workflow_events(
+        self,
+        workflow_runner: WorkflowRunner,
+        hook: HookRuntime,
+        workflow_name: str,
+        iteration: int | None,
+    ) -> None:
+        events = [
+            WorkflowEvent(
+                run_id=self._workflow_run_id,
+                hook=str(hook),
+                workflow_name=workflow_name,
+                job_name=result.name,
+                job_index=result.index,
+                arguments=result.arguments,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                status=result.status,
+                timestamp=result.timestamp,
+                iteration=iteration,
+            )
+            for result in workflow_runner.workflow_job_results()
+        ]
+        for event in events:
+            self.send_event(event)
+        self._pending_workflow_events.extend(events)
+
+    def _send_cancelled_workflow_events(
+        self,
+        workflow: Workflow,
+        hook: HookRuntime,
+        iteration: int | None,
+    ) -> None:
+        # Report jobs not started due to cancellation
+        now = datetime.datetime.now(tz=datetime.UTC)
+        events = [
+            WorkflowEvent(
+                run_id=self._workflow_run_id,
+                hook=str(hook),
+                workflow_name=workflow.name,
+                job_name=job.name,
+                job_index=index,
+                arguments=[str(arg) for arg in args],
+                stdout="",
+                stderr="",
+                status=WorkflowJobStatus.CANCELLED,
+                timestamp=now,
+                iteration=iteration,
+            )
+            for index, (job, args) in enumerate(workflow)
+        ]
+        for event in events:
+            self.send_event(event)
+        self._pending_workflow_events.extend(events)
+
+    def _persist_workflow_events_to_storage(
+        self, experiment: Experiment | None
+    ) -> None:
+        # Hold back output until storage is created
+        if experiment is None or not self._pending_workflow_events:
+            return
+        try:
+            experiment.append_workflow_events(
+                event.model_dump_json() for event in self._pending_workflow_events
+            )
+        except Exception:
+            logger.exception("Failed to persist workflow events to storage")
+        self._pending_workflow_events = []
 
     def _evaluate_and_postprocess(
         self,
@@ -859,7 +950,7 @@ class RunModel(RunModelConfig, ABC):
     ) -> int:
         try:
             asyncio.run(
-                create_run_path(
+                create_runpath(
                     run_args=run_args,
                     ensemble=ensemble,
                     user_config_file=str(self.user_config_file),
@@ -868,10 +959,10 @@ class RunModel(RunModelConfig, ABC):
                     forward_model_steps=self.forward_model_steps,
                     substitutions=self.substitutions,
                     parameters_file=self.runpath_config.gen_kw_export_name,
-                    runpaths=self._run_paths,
+                    runpaths=self._runpaths,
                     context_env=self._context_env,
                     end_event=self._end_event,
-                    handle_run_path_creation_event=self.send_event,
+                    handle_runpath_creation_event=self.send_event,
                 )
             )
         except UserCancelled as e:
@@ -884,7 +975,7 @@ class RunModel(RunModelConfig, ABC):
                 ensemble=ensemble,
                 reports_dir=self.reports_dir(experiment_name=ensemble.experiment.name),
                 random_seed=self.random_seed,
-                run_paths=self._run_paths,
+                run_paths=self._runpaths,
             ),
         )
 
@@ -941,7 +1032,7 @@ class RunModel(RunModelConfig, ABC):
                 ensemble=ensemble,
                 reports_dir=self.reports_dir(experiment_name=ensemble.experiment.name),
                 random_seed=self.random_seed,
-                run_paths=self._run_paths,
+                run_paths=self._runpaths,
             ),
         )
 

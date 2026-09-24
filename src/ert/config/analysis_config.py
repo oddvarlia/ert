@@ -97,7 +97,7 @@ class AnalysisConfig:
 
         options: dict[str, dict[str, Any]] = {"STD_ENKF": {}}
 
-        auto_scale_observations: list[str] = []
+        auto_scale_observations: list[ObservationGroups] = []
         analysis_set_var = config_dict.get(ConfigKeys.ANALYSIS_SET_VAR, [])
         inversion_str_map: Final = {
             "STD_ENKF": {
@@ -177,7 +177,9 @@ class AnalysisConfig:
                 continue
             if module_name == "OBSERVATIONS":
                 if var_name == "AUTO_SCALE":
-                    auto_scale_observations.append(value.split(","))
+                    auto_scale_observations.append(
+                        [observation.strip() for observation in value.split(",")]
+                    )
                 else:
                     all_errors.append(
                         ConfigValidationError(
@@ -258,7 +260,7 @@ class AnalysisConfig:
 
             obs_settings = ObservationSettings(
                 outlier_settings=OutlierSettings(**outlier_settings),
-                auto_scale_observations=auto_scale_observations,  # type: ignore
+                auto_scale_observations=auto_scale_observations,
             )
         except ValidationError as err:
             for error in err.errors():
@@ -274,7 +276,10 @@ class AnalysisConfig:
             es_settings.weights = es_mda_weights
 
         design_matrices = [
-            DesignMatrix.from_config_list(design_matrix_config_list)
+            DesignMatrix.from_config_list(
+                design_matrix_config_list,
+                parameter_type_update_strategies.get("GEN_KW"),
+            )
             for design_matrix_config_list in design_matrix_config_lists
         ]
         design_matrix: DesignMatrix | None = None

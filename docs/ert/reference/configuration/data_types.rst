@@ -521,7 +521,7 @@ the RFT file.
 
 
 Working with RFT observations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 RFT data is loaded into ERT automatically when you define :ref:`RFT_OBSERVATION <rft_observation>`
 entries in your observation configuration file. ERT reads the RFT files generated
@@ -555,6 +555,32 @@ For loading multiple RFT observations from a CSV file, see the
 :ref:`RFT_OBSERVATION <rft_observation>` documentation.
 
 
+.. _rft_qc_tool:
+
+Inspecting RFT observations and responses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When using the :ref:`RFT_OBSERVATION <rft_observation>` keyword to condition on
+RFT data, and/or the :ref:`RFT <rft>` keyword to load data from RFT files,
+a quality control widget for inspecting RFT observations and responses is available in
+the *Manage experiments* panel, by selecting the "Inspect RFT" tab when a realization is selected.
+
+.. image:: fig/gui_at_rft_qc_widget.png
+
+The widget displays responses and observations as points in 3D space. It provides options to filter
+on Well name, Date, Property and Status of the response/observation.
+
+By selecting a point in the plot, details about RFT observations and responses found at that
+point are displayed in the Point details section to the right.
+
+Points are displayed either using cell index (ijk) coordinates by default, or UTM coordinates
+by clicking the "Show UTM coordinates" checkbox.
+
+By default the widget only shows RFT observations and responses read and stored by ERT.
+The user can check the "Load RFT file content into plot" option to show all RFT responses available
+in the RFT file.
+
+
 .. _exporting_rft_data_for_visualization:
 
 Exporting RFT data for visualization
@@ -582,6 +608,32 @@ A custom filename can be specified as a parameter::
    configuration to make ERT extract these properties from the RFT files. For example::
 
       RFT WELL:PROD DATE:2015-02-01 PROPERTIES:PRESSURE,SWAT,SGAS
+
+
+.. _seismic_datatype:
+
+Seismic data
+^^^^^^^^^^^^
+
+In the context of ERT, seismic data is seismic attribute maps created by
+`fmu-sim2seis <https://github.com/equinor/fmu-sim2seis>`_.  Each map is a spatial
+grid of UTM coordinates, where each location stores an observed or simulated value
+and its associated error. The filename indicates what attribute each value represents.
+
+Files contain one row per measurement location and the following columns relevant for
+ERT:
+
+- ``X_UTME``: Easting coordinate of the measurement location.
+- ``Y_UTMN``: Northing coordinate of the measurement location.
+- ``OBS``: The observed/simulated value at that location.
+- ``OBS_ERROR``: The observation error (absolute standard deviation).
+
+All coordinates within a single file are expected to be more than 0.2 m apart.
+
+ERT provides two keywords to work with seismic data: :ref:`SEISMIC <seismic>` and
+:ref:`SEISMIC_OBSERVATION <seismic_observation>`. See the corresponding sections for
+configuration details and usage examples.
+
 
 General data: ``GEN_DATA``
 --------------------------

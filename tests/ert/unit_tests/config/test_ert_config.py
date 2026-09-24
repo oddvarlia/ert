@@ -1,7 +1,6 @@
 import datetime
 import json
 import logging
-import os
 import os.path
 import stat
 import warnings
@@ -129,9 +128,8 @@ def test_runpath_file_is_absolute(monkeypatch, tmp_path):
 @pytest.mark.usefixtures("use_tmpdir")
 def test_that_workflow_run_modes_can_be_selected(run_mode):
     my_script = Path("my_script").resolve()
-    my_script.write_text("", encoding="utf-8")
-    st = os.stat(my_script)
-    Path(my_script).chmod(st.st_mode | stat.S_IEXEC)
+    my_script.touch()
+    my_script.chmod(my_script.stat().st_mode | stat.S_IEXEC)
     test_user_config = Path("user_config.ert")
     test_user_config.write_text(
         dedent(f"""JOBNAME Job%d
@@ -167,10 +165,9 @@ def test_logging_config(caplog, config_content, expected):
 
 @pytest.mark.usefixtures("use_tmpdir")
 def test_custom_forward_models_are_logged(caplog):
-    localhack = "localhack.sh"
-    Path(localhack).write_text("", encoding="utf-8")
-    st = os.stat(localhack)
-    Path(localhack).chmod(st.st_mode | stat.S_IEXEC)
+    localhack = Path("localhack.sh")
+    localhack.write_text("", encoding="utf-8")
+    localhack.chmod(localhack.stat().st_mode | stat.S_IEXEC)
     Path("foo_fm").write_text(
         f"-- A comment\n   \nEXECUTABLE {localhack}\n\n\n", encoding="utf-8"
     )
@@ -239,7 +236,7 @@ def test_that_parsing_workflows_gives_expected():
         ConfigKeys.NUM_REALIZATIONS: 1,
     }
 
-    os.mkdir("workflows")
+    Path("workflows").mkdir()
 
     Path("workflows/MAGIC_PRINT").write_text("print_uber\n", encoding="utf-8")
     Path("workflows/NO_PRINT").write_text("print_uber\n", encoding="utf-8")
@@ -402,7 +399,7 @@ def test_that_the_date_magic_string_is_substituted_with_todays_date():
     ert_config = ErtConfig.from_file(test_config_file_name)
 
     date_string = datetime.datetime.now().astimezone().date().isoformat()
-    expected_storage = os.path.abspath(f"storage/{test_config_file_base}-{date_string}")
+    expected_storage = Path(f"storage/{test_config_file_base}-{date_string}").resolve()
     expected_run_path = f"{expected_storage}/runpath/realization-<IENS>/iter-<ITER>"
     expected_ens_path = f"{expected_storage}/ensemble"
     assert ert_config.ens_path == expected_ens_path
@@ -412,7 +409,7 @@ def test_that_the_date_magic_string_is_substituted_with_todays_date():
 def test_that_subst_list_is_given_default_runpath_file():
     assert ErtConfig.from_file_contents("NUM_REALIZATIONS 1").substitutions[
         "<RUNPATH_FILE>"
-    ] == os.path.abspath(ErtConfig.DEFAULT_RUNPATH_FILE)
+    ] == str(Path(ErtConfig.DEFAULT_RUNPATH_FILE).resolve())
 
 
 @pytest.mark.slow
@@ -470,10 +467,10 @@ def test_that_parsing_ert_config_result_in_expected_values(
         assert ert_config.ens_path == config_values.enspath
         assert ert_config.random_seed == config_values.random_seed
         assert ert_config.queue_config.max_submit == config_values.max_submit
-        assert ert_config.user_config_file == os.path.abspath(filename)
+        assert ert_config.user_config_file == str(Path(filename).resolve())
         assert ert_config.config_path == str(Path.cwd())
-        assert str(ert_config.runpath_file) == os.path.abspath(
-            config_values.runpath_file
+        assert str(ert_config.runpath_file) == str(
+            Path(config_values.runpath_file).resolve()
         )
         assert (
             ert_config.runpath_config.num_realizations == config_values.num_realizations
@@ -488,7 +485,7 @@ def test_default_ens_path():
         "NUM_REALIZATIONS 1\nENSPATH storage\n"
     ).ens_path
 
-    assert os.path.abspath(default_ens_path) == os.path.abspath(set_in_file_ens_path)
+    assert Path(default_ens_path).resolve() == Path(set_in_file_ens_path).resolve()
 
     dict_set_ens_path = ErtConfig.from_dict(
         {
@@ -497,7 +494,7 @@ def test_default_ens_path():
         }
     ).ens_path
 
-    assert os.path.abspath(dict_set_ens_path) == os.path.abspath(default_ens_path)
+    assert Path(dict_set_ens_path).resolve() == Path(default_ens_path).resolve()
 
 
 @pytest.mark.parametrize(
@@ -624,10 +621,10 @@ def test_that_loading_non_existent_workflow_job_gives_validation_error():
 @pytest.mark.usefixtures("use_tmpdir")
 def test_that_job_definition_file_with_unexecutable_script_gives_validation_error():
     test_config_file_name = "test.ert"
-    job_definition_file = os.path.abspath("not_executable")
+    job_definition_file = Path("not_executable").resolve()
     job_name = "JOB_NAME"
     Path(job_name).write_text(f"EXECUTABLE {job_definition_file}\n", encoding="utf-8")
-    Path(job_definition_file).write_text("#!/bin/sh\n", encoding="utf-8")
+    job_definition_file.write_text("#!/bin/sh\n", encoding="utf-8")
 
     Path(test_config_file_name).write_text(
         dedent(
@@ -1241,7 +1238,7 @@ def test_that_included_files_uses_paths_relative_to_itself():
         FORWARD_MODEL FM
         """
     )
-    os.mkdir("includes")
+    Path("includes").mkdir()
     test_include_file_name = "includes/install_jobs.ert"
     test_include_contents = dedent(
         """
@@ -1299,7 +1296,7 @@ def test_that_include_take_into_account_path():
         """
     )
     # The old parser tries to find dir/job2
-    os.mkdir("dir")
+    Path("dir").mkdir()
     Path("dir/job1").write_text("EXECUTABLE echo\n", encoding="utf-8")
     Path("job2").write_text("EXECUTABLE ls\n", encoding="utf-8")
     Path(test_config_file_name).write_text(test_config_contents, encoding="utf-8")
@@ -1328,7 +1325,7 @@ def test_that_substitution_happens_for_include():
         RUNPATH my_silly_runpath<ITER>-<IENS>
         """
     )
-    os.mkdir("dir")
+    Path("dir").mkdir()
     Path(test_config_file_name).write_text(test_config_contents, encoding="utf-8")
     Path(test_include_file_name).write_text(test_include_contents, encoding="utf-8")
 
@@ -1356,7 +1353,7 @@ def test_that_defines_in_included_files_has_immediate_effect():
         DEFINE <FOO> baz
         """
     )
-    os.mkdir("dir")
+    Path("dir").mkdir()
     Path(test_config_file_name).write_text(test_config_contents, encoding="utf-8")
     Path(test_include_file_name).write_text(test_include_contents, encoding="utf-8")
 
@@ -2972,6 +2969,103 @@ def test_that_hook_workflow_job_registers_and_hooks_workflow(ert_config_with_job
     assert ert_config.workflows["my_wf"] in ert_config.hooked_workflows[mode]
 
 
+@pytest.mark.parametrize(
+    ("hook_lines_in_config_order", "expected_hook_order"),
+    [
+        pytest.param(
+            [
+                "HOOK_WORKFLOW_JOB inline_wf MY_JOB PRE_SIMULATION",
+                "HOOK_WORKFLOW loaded_wf PRE_SIMULATION",
+            ],
+            ["inline_wf", "loaded_wf"],
+            id="hook_workflow_job_declared_before_hook_workflow",
+        ),
+        pytest.param(
+            [
+                "HOOK_WORKFLOW loaded_wf PRE_SIMULATION",
+                "HOOK_WORKFLOW_JOB inline_wf MY_JOB PRE_SIMULATION",
+            ],
+            ["loaded_wf", "inline_wf"],
+            id="hook_workflow_declared_before_hook_workflow_job",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("use_tmpdir")
+def test_that_hooked_workflows_are_ordered_by_position_in_config_file(
+    ert_config_with_job, hook_lines_in_config_order, expected_hook_order
+):
+    Path("loaded_wf").write_text("MY_JOB\n", encoding="utf-8")
+    hook_lines = "\n".join(hook_lines_in_config_order)
+    ert_config = ert_config_with_job.from_file_contents(
+        dedent(f"""
+        NUM_REALIZATIONS 1
+        LOAD_WORKFLOW loaded_wf
+        {hook_lines}
+        """)
+    )
+
+    hooked_workflows = ert_config.hooked_workflows[HookRuntime.PRE_SIMULATION]
+    actual_hook_order = [Path(wf.src_file).name for wf in hooked_workflows]
+    assert actual_hook_order == expected_hook_order
+
+
+@pytest.mark.usefixtures("use_tmpdir")
+def test_that_hooked_workflows_across_include_are_ordered_by_declaration(
+    ert_config_with_job,
+):
+    """A hook declared in an INCLUDE'd file must keep its position relative to
+    hooks declared directly in the including config file, not be reordered to
+    the position of the INCLUDE line itself or grouped by keyword.
+    """
+    Path("included.ert").write_text(
+        dedent("""
+        LOAD_WORKFLOW loaded_wf
+        HOOK_WORKFLOW loaded_wf PRE_SIMULATION
+        """),
+        encoding="utf-8",
+    )
+    Path("loaded_wf").write_text("MY_JOB\n", encoding="utf-8")
+    ert_config = ert_config_with_job.from_file_contents(
+        dedent("""
+        NUM_REALIZATIONS 1
+        HOOK_WORKFLOW_JOB inline_wf_before MY_JOB PRE_SIMULATION
+        INCLUDE included.ert
+        HOOK_WORKFLOW_JOB inline_wf_after MY_JOB PRE_SIMULATION
+        """)
+    )
+
+    hooked_workflows = ert_config.hooked_workflows[HookRuntime.PRE_SIMULATION]
+    actual_hook_order = [Path(wf.src_file).name for wf in hooked_workflows]
+    assert actual_hook_order == ["inline_wf_before", "loaded_wf", "inline_wf_after"]
+
+
+@pytest.mark.usefixtures("use_tmpdir")
+def test_that_hooked_workflows_are_ordered_when_name_uses_a_define(
+    ert_config_with_job,
+):
+    """A hook whose name is built from a DEFINE must keep its declared
+    position, not fall back to the front because the substitution replaced
+    its underlying token with a new one.
+    """
+    ert_config = ert_config_with_job.from_file_contents(
+        dedent("""
+        DEFINE <WF_SUFFIX> substituted
+        NUM_REALIZATIONS 1
+        HOOK_WORKFLOW_JOB before_wf MY_JOB PRE_SIMULATION
+        HOOK_WORKFLOW_JOB inline_wf_<WF_SUFFIX> MY_JOB PRE_SIMULATION
+        HOOK_WORKFLOW_JOB after_wf MY_JOB PRE_SIMULATION
+        """)
+    )
+
+    hooked_workflows = ert_config.hooked_workflows[HookRuntime.PRE_SIMULATION]
+    actual_hook_order = [Path(wf.src_file).name for wf in hooked_workflows]
+    assert actual_hook_order == [
+        "before_wf",
+        "inline_wf_substituted",
+        "after_wf",
+    ]
+
+
 def test_that_create_workflow_from_job_with_unknown_job_name_raises_error():
     with pytest.raises(
         ConfigValidationError,
@@ -3227,3 +3321,43 @@ def test_that_log_shape_registry_logs_count_of_shapes(caplog):
         shape_registry.register(CircleShapeConfig(north=i, east=i, radius=i))
     log_shape_registry(shape_registry)
     assert "Count of shapes in ShapeRegistry: {'CircleShapeConfig': 10}" in caplog.text
+
+
+@pytest.mark.usefixtures("use_tmpdir")
+def test_that_workflow_takes_name_given_to_load_workflow():
+    Path("WFJOB").write_text("EXECUTABLE echo\n", encoding="utf-8")
+    Path("wf_file").write_text("WFJOB hello\n", encoding="utf-8")
+    Path("test.ert").write_text(
+        dedent(
+            """
+            NUM_REALIZATIONS 1
+            LOAD_WORKFLOW_JOB WFJOB
+            LOAD_WORKFLOW wf_file my_workflow_name
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    ert_config = ErtConfig.from_file("test.ert")
+
+    assert ert_config.workflows["my_workflow_name"].name == "my_workflow_name"
+
+
+@pytest.mark.usefixtures("use_tmpdir")
+def test_that_workflow_without_explicit_name_is_named_after_its_file():
+    Path("WFJOB").write_text("EXECUTABLE echo\n", encoding="utf-8")
+    Path("wf_file").write_text("WFJOB hello\n", encoding="utf-8")
+    Path("test.ert").write_text(
+        dedent(
+            """
+            NUM_REALIZATIONS 1
+            LOAD_WORKFLOW_JOB WFJOB
+            LOAD_WORKFLOW wf_file
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    ert_config = ErtConfig.from_file("test.ert")
+
+    assert ert_config.workflows["wf_file"].name == "wf_file"

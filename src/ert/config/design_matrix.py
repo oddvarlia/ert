@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,7 +11,10 @@ import numpy as np
 import polars as pl
 from fastexcel import CalamineCellError, CalamineError
 from polars.exceptions import InvalidOperationError
+from python_calamine import CalamineError as PythonCalamineError
+from python_calamine import CalamineWorkbook
 
+from ert.config.parameter_config import LocalizationType
 from ert.config.parsing.config_errors import ConfigWarning
 
 from .distribution import RawSettings
@@ -26,10 +30,12 @@ DESIGN_MATRIX_GROUP = "DESIGN_MATRIX"
 
 @dataclass
 class DesignMatrix:
-    xls_filename: Path
+    filename: Path
     design_sheet: str
     default_sheet: str | None
     priority_source: str = "design_matrix"
+    update: bool = False
+    update_strategy: LocalizationType | None = None
 
     DISALLOWED_CELL_VALUES: ClassVar[list[str]] = ["nan", "null", "none", ""]
 
@@ -45,17 +51,21 @@ class DesignMatrix:
             }
         except (ValueError, AttributeError) as exc:
             raise ConfigValidationError.with_context(
-                f"Error reading design matrix {self.xls_filename}"
+                f"Error reading design matrix {self.filename}"
                 f" ({self.design_sheet} {self.default_sheet or ''}):"
                 f" {exc}",
-                str(self.xls_filename),
+                str(self.filename),
             ) from exc
 
     @classmethod
-    def from_config_list(cls, config_list: list[str | dict[str, str]]) -> DesignMatrix:
+    def from_config_list(
+        cls,
+        config_list: list[str | dict[str, str]],
+        update_strategy: LocalizationType | None,
+    ) -> DesignMatrix:
         filename = Path(cast(str, config_list[0]))
         options = cast(dict[str, str], config_list[1])
-        valid_options = ["DESIGN_SHEET", "DEFAULT_SHEET", "PRIORITY"]
+        valid_options = ["DESIGN_SHEET", "DEFAULT_SHEET", "PRIORITY", "UPDATE"]
         option_errors = [
             ErrorInfo(
                 f"Option {option} is not a valid DESIGN_MATRIX option. "
@@ -70,14 +80,12 @@ class DesignMatrix:
         design_sheet = options.get("DESIGN_SHEET", "DesignSheet")
         default_sheet = options.get("DEFAULT_SHEET", None)
         priority_source = options.get("PRIORITY", DataSource.DESIGN_MATRIX)
+        update_value = options.get("UPDATE", "FALSE").upper()
         errors = []
-        if filename.suffix not in {
-            ".xlsx",
-            ".xls",
-        }:
+        if filename.suffix != ".xlsx":
             errors.append(
                 ErrorInfo(
-                    f"DESIGN_MATRIX must be of format .xls or .xlsx; is '{filename}'"
+                    f"DESIGN_MATRIX must have file extension .xlsx; is '{filename}'"
                 ).set_context(config_list)
             )
         if design_sheet is not None and design_sheet == default_sheet:
@@ -93,14 +101,23 @@ class DesignMatrix:
                     f" or '{DataSource.SAMPLED}' priority is '{priority_source}'"
                 ).set_context(config_list)
             )
+        if update_value not in {"TRUE", "FALSE"}:
+            errors.append(
+                ErrorInfo(
+                    f"UPDATE must be either 'TRUE' or 'FALSE'; is '{update_value}'"
+                ).set_context(config_list)
+            )
         if errors:
             raise ConfigValidationError.from_collected(errors)
+
         assert design_sheet is not None
         return cls(
-            xls_filename=filename,
+            filename=filename,
             design_sheet=design_sheet,
             default_sheet=default_sheet,
             priority_source=priority_source,
+            update=update_value == "TRUE",
+            update_strategy=update_strategy,
         )
 
     def merge_with_other(self, dm_other: DesignMatrix) -> None:
@@ -111,9 +128,9 @@ class DesignMatrix:
         if common_keys:
             errors.append(
                 ErrorInfo(
-                    f"Design Matrices '{self.xls_filename.name} "
+                    f"Design Matrices '{self.filename.name} "
                     f"({self.design_sheet} {self.default_sheet or ''})' and "
-                    f"'{dm_other.xls_filename.name} ({dm_other.design_sheet} "
+                    f"'{dm_other.filename.name} ({dm_other.design_sheet} "
                     f"{dm_other.default_sheet or ''})' "
                     "contains columns with the same name: "
                     f"{common_keys}!"
@@ -129,17 +146,17 @@ class DesignMatrix:
             if not any(real_intersection):
                 errors.append(
                     ErrorInfo(
-                        f"Design Matrices '{self.xls_filename.name} "
+                        f"Design Matrices '{self.filename.name} "
                         f"({self.design_sheet} {self.default_sheet or ''})' and "
-                        f"'{dm_other.xls_filename.name} "
+                        f"'{dm_other.filename.name} "
                         f"({dm_other.design_sheet} {dm_other.default_sheet or ''})' "
                         "do not have any active realizations in common!"
                     )
                 )
             else:
                 ConfigWarning.warn(
-                    f"Design Matrices '{self.xls_filename.name} ({self.design_sheet} "
-                    f"{self.default_sheet or ''})' and '{dm_other.xls_filename.name} "
+                    f"Design Matrices '{self.filename.name} ({self.design_sheet} "
+                    f"{self.default_sheet or ''})' and '{dm_other.filename.name} "
                     f"({dm_other.design_sheet} {dm_other.default_sheet or ''})' "
                     "do not have the same active realizations. The merged design "
                     "matrix will only contain the realizations that are active "
@@ -157,9 +174,9 @@ class DesignMatrix:
         except ValueError as exc:
             raise ConfigValidationError(
                 f"Error when merging design matrices "
-                f"'{self.xls_filename.name} ({self.design_sheet}"
+                f"'{self.filename.name} ({self.design_sheet}"
                 f" {self.default_sheet or ''})'"
-                f" and '{dm_other.xls_filename.name} ({dm_other.design_sheet} "
+                f" and '{dm_other.filename.name} ({dm_other.design_sheet} "
                 f"{dm_other.default_sheet or ''})': {exc}!"
             ) from exc
 
@@ -189,24 +206,30 @@ class DesignMatrix:
 
         new_param_configs: list[ParameterConfig] = []
 
-        design_cfgs = {cfg.name: cfg for cfg in self.parameter_configurations}
+        design_matrix_cfgs = {cfg.name: cfg for cfg in self.parameter_configurations}
 
         for param_cfg in existing_parameters:
-            if isinstance(param_cfg, GenKwConfig) and param_cfg.name in design_cfgs:
-                del design_cfgs[param_cfg.name]
+            if (
+                isinstance(param_cfg, GenKwConfig)
+                and param_cfg.name in design_matrix_cfgs
+            ):
                 input_source = DataSource(
                     self.parameter_priority.get(
                         param_cfg.name, DataSource.DESIGN_MATRIX.value
                     )
                 )
+
+                if input_source == DataSource.SAMPLED:
+                    update_strategy = param_cfg.update_strategy
+                elif self.update:
+                    update_strategy = self.update_strategy or LocalizationType.GLOBAL
+                else:
+                    update_strategy = None
+
                 new_param_configs += [
                     GenKwConfig(
                         name=param_cfg.name,
-                        update_strategy=(
-                            param_cfg.update_strategy
-                            if input_source == DataSource.SAMPLED
-                            else None
-                        ),
+                        update_strategy=update_strategy,
                         distribution=(
                             RawSettings()
                             if input_source == DataSource.DESIGN_MATRIX
@@ -220,10 +243,18 @@ class DesignMatrix:
                         input_source=input_source,
                     ),
                 ]
+                del design_matrix_cfgs[param_cfg.name]
             else:
                 new_param_configs += [param_cfg]
-        if design_cfgs.values():
-            new_param_configs += list(design_cfgs.values())
+
+        if design_matrix_cfgs.values():
+            if self.update:
+                for cfg in design_matrix_cfgs.values():
+                    cfg.update_strategy = (
+                        self.update_strategy or LocalizationType.GLOBAL
+                    )
+            new_param_configs += list(design_matrix_cfgs.values())
+
         return new_param_configs
 
     def read_and_validate_design_matrix(
@@ -257,7 +288,7 @@ class DesignMatrix:
             param_names = (
                 _read_excel(
                     lambda: pl.read_excel(
-                        self.xls_filename,
+                        self.filename,
                         sheet_name=self.design_sheet,
                         has_header=False,
                         read_options={"n_rows": 1, "dtypes": "string"},
@@ -271,7 +302,7 @@ class DesignMatrix:
             raise ValueError("Design sheet headers are empty.") from err
         design_matrix_df = _read_excel(
             lambda: pl.read_excel(
-                self.xls_filename,
+                self.filename,
                 sheet_name=self.design_sheet,
                 has_header=False,
                 drop_empty_cols=False,
@@ -349,11 +380,13 @@ class DesignMatrix:
         design_matrix_df.columns = list(param_names)
 
         if self.default_sheet is not None:
-            defaults_to_use = DesignMatrix._read_defaultssheet(
-                self.xls_filename, self.default_sheet, design_matrix_df.columns
+            defaults = read_default_values(
+                self.filename, self.default_sheet, has_header=False
             )
             design_matrix_df = design_matrix_df.with_columns(
-                pl.lit(value).alias(name) for name, value in defaults_to_use.items()
+                pl.lit(value).alias(name)
+                for name, value in defaults.items()
+                if name not in design_matrix_df.columns
             )
 
         if "realization" in design_matrix_df.schema:
@@ -386,7 +419,7 @@ class DesignMatrix:
                 update_strategy=None,
                 group=DESIGN_MATRIX_GROUP,
                 input_source=DataSource.DESIGN_MATRIX,
-                distribution={"name": "raw"},
+                distribution=RawSettings(name="raw"),
             )
             for col in design_matrix_df.columns
             if col != "realization"
@@ -446,79 +479,62 @@ class DesignMatrix:
                 errors.append(f"Numeric parameter name found in column {column_num}.")
         return errors
 
-    @staticmethod
-    def _read_defaultssheet(
-        xls_filename: Path,
-        defaults_sheetname: str,
-        existing_parameters: list[str],
-    ) -> dict[str, str | float | int]:
-        """
-        Construct a dict of keys and values to be used as defaults from the
-        first two columns in a spreadsheet. Only returns the keys that are
-        different from the existing parameters.
 
-        Returns a dict of default values
+def read_default_values(
+    filename: Path, sheet_name: str, *, has_header: bool
+) -> dict[str, str | float | int | bool]:
+    """
+    Construct a dict of keys and values to be used as defaults from the
+    first two columns in a spreadsheet.
+    """
+    try:
+        with CalamineWorkbook.from_path(filename) as workbook:
+            rows = workbook.get_sheet_by_name(sheet_name).to_python(
+                skip_empty_area=False
+            )
+    except PythonCalamineError as err:
+        raise ValueError(
+            f"The default sheet '{sheet_name}' in '{filename}' could not be read: {err}"
+        ) from err
 
-        :raises: ValueError if defaults sheet is non-empty but non-parsable
-        """
-        default_df = _read_excel(
-            lambda: pl.read_excel(
-                xls_filename,
-                sheet_name=defaults_sheetname,
-                has_header=False,
-                drop_empty_cols=True,
-                drop_empty_rows=False,
-                raise_if_empty=False,
-                # `has_header=False` and `skip_rows` anchor the read at an
-                # absolute spreadsheet row. Without it the reader trims blank
-                # rows above the first non-empty row, which would shift the
-                # reported row numbers.
-                read_options={"dtypes": "string", "skip_rows": 0},
-            ),
-            f"Default sheet '{defaults_sheetname}'",
-        )
-        # The defaults sheet has no header row, so the first row read
-        # corresponds to row 1 in the spreadsheet.
-        default_df, excel_row_numbers = _drop_empty_rows(default_df, first_excel_row=1)
-        if default_df.is_empty():
-            return {}
-        if len(default_df.columns) < 2:
+    defaults: dict[str, str | float | int | bool] = {}
+    empty_cells: list[str] = []
+    duplicate_names: set[str] = set()
+    for row_number, row in enumerate(
+        rows[int(has_header) :], start=1 + int(has_header)
+    ):
+        if all(isinstance(cell, str) and not cell.strip() for cell in row):
+            continue
+        if len(row) < 2:
             raise ValueError("Defaults sheet must have at least two columns")
-        default_df = default_df.select(pl.nth(0, 1)).with_columns(
-            pl.nth(0, 1).str.strip_chars()
-        )
-        default_df = default_df.with_columns(
-            [
-                pl.when(
-                    pl.col(col)
-                    .str.to_lowercase()
-                    .is_in(DesignMatrix.DISALLOWED_CELL_VALUES)
-                )
-                .then(None)
-                .otherwise(pl.col(col))
-                .alias(col)
-                for col in default_df.columns
-            ]
-        )
-        empty_cells = [
-            f"Row {excel_row_numbers[i]}, column {j}"
-            for i, j in zip(
-                *np.where(default_df.select(pl.all().is_null())), strict=False
-            )
-        ]
-        if len(empty_cells) > 0:
-            raise ValueError(
-                "Default sheet contains empty cells or cells with a "
-                f"disallowed value {empty_cells}"
-            )
-        if default_df.select(pl.nth(0)).is_duplicated().any():
-            raise ValueError("Default sheet contains duplicate parameter names")
 
-        return {
-            row[0]: convert_to_numeric(row[1])
-            for row in default_df.iter_rows()
-            if row[0] not in existing_parameters
-        }
+        name = str(row[0]).strip()
+        value = row[1]
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        elif not isinstance(value, (int, float)):
+            value = convert_to_numeric(str(value).strip())
+        empty_cells.extend(
+            f"Row {row_number}, column {column}"
+            for column, cell in enumerate((name, value))
+            if str(cell).lower() in DesignMatrix.DISALLOWED_CELL_VALUES
+            or (isinstance(cell, float) and not math.isfinite(cell))
+        )
+        if name in defaults:
+            duplicate_names.add(name)
+        defaults[name] = value
+
+    if empty_cells:
+        raise ValueError(
+            "Default sheet contains empty cells or cells with a "
+            f"disallowed value {empty_cells}"
+        )
+    if duplicate_names:
+        raise ValueError(
+            f"Default sheet '{sheet_name}' contains duplicate parameter names: "
+            f"{', '.join(sorted(duplicate_names))}"
+        )
+    return defaults
 
 
 def _drop_empty_rows(

@@ -16,9 +16,9 @@ def symlink(target: str, link_name: str) -> None:
     if len(link_path) == 0:
         target_check = Path(target)
     else:
-        if not os.path.isdir(link_path):
+        if not Path(link_path).is_dir():
             print(f"Creating directory for link: {link_path}")
-            os.makedirs(link_path)
+            Path(link_path).mkdir(parents=True)
         target_check = Path(link_path) / target
 
     if not target_check.exists():
@@ -27,9 +27,9 @@ def symlink(target: str, link_name: str) -> None:
             f"which implies that {target_check} must exist, but it does not."
         )
 
-    if os.path.islink(link_name):
+    if Path(link_name).is_symlink():
         os.unlink(link_name)
-    os.symlink(target, link_name)
+    Path(link_name).symlink_to(target)
     print(f"Linking '{link_name}' -> '{target}' [ cwd:{Path.cwd()} ]")
 
 

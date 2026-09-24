@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import warnings
 from base64 import b64encode
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,34 +10,42 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+import yaml
 from fastapi.encoders import jsonable_encoder
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from ert.config import ConfigWarning
 from ert.dark_storage.app import app
-from ert.dark_storage.endpoints.experiment_server import (
+from ert.dark_storage.endpoints.experiment_runs import (
     ExperimentRunnerState,
     _experiments,
 )
 from ert.ensemble_evaluator import EndEvent
 from ert.run_models.event import StatusEvents
 from ert.scheduler.event import FinishedEvent
-from ert.services import create_ertserver_client
+from ert.services import ErtClient
 from ert.storage import ExperimentState
 from everest.bin.utils import get_experiment_status
 from everest.config import EverestConfig, ServerConfig
-from everest.detached import (
-    everserver,
-    start_experiment,
+from everest.everserver import server as everserver
+from everest.everserver import (
     start_server,
-    wait_for_server,
 )
 from everest.strings import (
     OPT_FAILURE_ALL_REALIZATIONS,
     OPT_FAILURE_REALIZATIONS,
 )
 from everest.util._utils import get_everest_experiment
+from tests.everest.utils import MIN_CONFIG, everest_config_with_defaults
+
+
+@pytest.fixture
+def authorized_client(monkeypatch):
+    monkeypatch.setenv("ERT_STORAGE_TOKEN", "password")
+    credentials = b64encode(b"username:password").decode()
+    auth_headers = {"Authorization": f"Basic {credentials}"}
+    return TestClient(app), auth_headers
 
 
 @pytest.fixture
@@ -70,14 +79,9 @@ async def wait_for_server_to_complete(config):
                 return
 
     driver = await start_server(config, logging.DEBUG)
-    client = create_ertserver_client(
-        Path(ServerConfig.get_session_dir(config.output_dir))
-    )
-    wait_for_server(client, 120)
-    start_experiment(
-        server_context=ServerConfig.get_server_context_from_conn_info(client.conn_info),
-        config=config,
-    )
+    api = ErtClient.get_client(Path(ServerConfig.get_session_dir(config.output_dir)))
+    api.wait_for_server(timeout=120)
+    api.start_experiment(config.to_dict())
     await server_running()
 
 
@@ -95,14 +99,14 @@ def mock_server(monkeypatch):
         response_mock.json.return_value = {"status": status, "message": message}
         client_mock.get.return_value = response_mock
         server_patch.session.return_value.__enter__.return_value = client_mock
-        monkeypatch.setattr("everest.detached.everserver.ErtServer", server_patch)
+        monkeypatch.setattr("everest.everserver.server.ErtServer", server_patch)
 
     return func
 
 
 @patch("sys.argv", ["name", "--output-dir", "everest_output"])
 @patch(
-    "everest.detached.everserver._configure_loggers",
+    "everest.everserver.server._configure_loggers",
     side_effect=configure_everserver_logger,
 )
 def test_configure_logger_failure(mock_configure_loggers, change_to_tmpdir, caplog):
@@ -115,7 +119,7 @@ def test_configure_logger_failure(mock_configure_loggers, change_to_tmpdir, capl
 @pytest.mark.slow
 @pytest.mark.xdist_group(name="starts_everest")
 @patch("sys.argv", ["name", "--output-dir", "everest_output"])
-@patch("everest.detached.everserver._configure_loggers")
+@patch("everest.everserver.server._configure_loggers")
 async def test_status_exception(mock_configure_loggers, change_to_tmpdir, min_config):
     min_config["simulator"] = {"queue_system": {"name": "local"}}
     config = EverestConfig(**min_config)
@@ -246,7 +250,7 @@ def test_websocket_no_authentication(setup_client):
     client, _, experiment_id = setup_client()
     with (
         client.websocket_connect(
-            f"/experiment_server/events/{experiment_id}"
+            f"/experiment_runs/events/{experiment_id}"
         ) as websocket,
         pytest.raises(WebSocketDisconnect) as exception,
     ):
@@ -259,7 +263,7 @@ def test_websocket_wrong_password(setup_client):
     credentials = b64encode(b"username:wrong_password").decode()
     with (
         client.websocket_connect(
-            f"/experiment_server/events/{experiment_id}",
+            f"/experiment_runs/events/{experiment_id}",
             headers={"Authorization": f"Basic {credentials}"},
         ) as websocket,
         pytest.raises(WebSocketDisconnect) as exception,
@@ -273,13 +277,13 @@ def test_websocket_multiple_connections(setup_client):
     client, subscribers, experiment_id = setup_client()
     credentials = b64encode(b"username:password").decode()
     with client.websocket_connect(
-        f"/experiment_server/events/{experiment_id}",
+        f"/experiment_runs/events/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     ) as websocket:
         event = websocket.receive_json()
         websocket.close()
     with client.websocket_connect(
-        f"/experiment_server/events/{experiment_id}",
+        f"/experiment_runs/events/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     ) as websocket:
         event_2 = websocket.receive_json()
@@ -292,13 +296,13 @@ def test_websocket_multiple_connections_one_fails(setup_client):
     credentials = b64encode(b"username:password").decode()
     with (
         client.websocket_connect(
-            f"/experiment_server/events/{experiment_id}"
+            f"/experiment_runs/events/{experiment_id}"
         ) as websocket,
         pytest.raises(WebSocketDisconnect),
     ):
         websocket.receive_json()
     with client.websocket_connect(
-        f"/experiment_server/events/{experiment_id}",
+        f"/experiment_runs/events/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     ) as websocket:
         event = websocket.receive_json()
@@ -320,7 +324,7 @@ def test_websocket_multiple_events_in_queue(setup_client):
     credentials = b64encode(b"username:password").decode()
     event_msgs = []
     with client.websocket_connect(
-        f"/experiment_server/events/{experiment_id}",
+        f"/experiment_runs/events/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     ) as websocket:
         event_msgs.extend(websocket.receive_json() for _ in expected)
@@ -328,41 +332,34 @@ def test_websocket_multiple_events_in_queue(setup_client):
 
 
 def test_that_multiple_started_experiments_each_receive_distinct_experiment_ids(
-    monkeypatch,
+    authorized_client,
 ):
-    monkeypatch.setenv("ERT_STORAGE_TOKEN", "password")
+    client, auth_headers = authorized_client
     original = dict(_experiments)
     _experiments.clear()
     try:
-        credentials = b64encode(b"username:password").decode()
-        auth_headers = {"Authorization": f"Basic {credentials}"}
-        client = TestClient(app)
         mock_runner = MagicMock()
         mock_runner.run = AsyncMock()
-        with (
-            patch.object(EverestConfig, "with_plugins", return_value=MagicMock()),
-            patch(
-                "ert.dark_storage.endpoints.experiment_server.ExperimentRunner",
-                return_value=mock_runner,
-            ),
+        config_body = everest_config_with_defaults().to_dict()
+        with patch(
+            "ert.dark_storage.endpoints.experiment_runs.ExperimentRunner",
+            return_value=mock_runner,
         ):
             r1 = client.post(
-                "/experiment_server/start_experiment",
-                json={"type": "everest_config"},
+                "/experiment_runs/start_experiment",
+                json=config_body,
                 headers=auth_headers,
             )
             r2 = client.post(
-                "/experiment_server/start_experiment",
-                json={"type": "everest_config"},
+                "/experiment_runs/start_experiment",
+                json=config_body,
                 headers=auth_headers,
             )
         assert r1.status_code == r2.status_code == 200
         experiment_id_1 = r1.json()["experiment_id"]
         experiment_id_2 = r2.json()["experiment_id"]
         assert experiment_id_1 != experiment_id_2
-        runs_response = client.get(
-            "/experiment_server/experiments", headers=auth_headers
-        )
+        runs_response = client.get("/experiment_runs/experiments", headers=auth_headers)
         assert runs_response.status_code == 200
         assert set(runs_response.json()["experiment_ids"]) >= {
             experiment_id_1,
@@ -373,6 +370,84 @@ def test_that_multiple_started_experiments_each_receive_distinct_experiment_ids(
         _experiments.update(original)
 
 
+def test_that_start_experiment_with_incomplete_schema_returns_422(authorized_client):
+    client, auth_headers = authorized_client
+
+    # Missing all required fields (controls, objective_functions,
+    # config_path, model): schema validation should reject this before
+    # the endpoint body (and thus ExperimentRunner) is ever reached.
+    response = client.post(
+        "/experiment_runs/start_experiment",
+        json={},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 422
+    missing_fields = {
+        tuple(error["loc"])
+        for error in response.json()["detail"]
+        if error["type"] == "missing"
+    }
+    assert missing_fields == {
+        ("body", "controls"),
+        ("body", "objective_functions"),
+        ("body", "config_path"),
+        ("body", "model"),
+    }
+
+
+def test_that_start_experiment_with_unknown_forward_model_job_returns_422(
+    authorized_client,
+):
+    client, auth_headers = authorized_client
+
+    config_body = yaml.safe_load(MIN_CONFIG) | {
+        "forward_model": ["totally_unknown_job_xyz"]
+    }
+
+    response = client.post(
+        "/experiment_runs/start_experiment",
+        json=config_body,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 422
+    assert "unknown job totally_unknown_job_xyz" in response.text
+
+
+def test_that_start_experiment_mutes_config_warnings(authorized_client, monkeypatch):
+    client, auth_headers = authorized_client
+    mock_runner = MagicMock()
+    mock_runner.run = AsyncMock()
+
+    config_body = yaml.safe_load(MIN_CONFIG)
+
+    def _raise_a_config_warning(*args, **kwargs):
+        warnings.warn("Forced test ConfigWarning", category=ConfigWarning, stacklevel=2)
+
+    monkeypatch.setattr(
+        "everest.config.everest_config.validate_forward_model_configs",
+        _raise_a_config_warning,
+    )
+
+    with (
+        patch(
+            "ert.dark_storage.endpoints.experiment_runs.ExperimentRunner",
+            return_value=mock_runner,
+        ),
+        warnings.catch_warnings(record=True) as caught_warnings,
+    ):
+        warnings.simplefilter("always")
+        response = client.post(
+            "/experiment_runs/start_experiment",
+            json=config_body,
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200
+    assert not any(issubclass(w.category, ConfigWarning) for w in caught_warnings)
+
+
 async def test_websocket_no_events_on_connect(setup_client):
     events = []
     client, subs, experiment_id = setup_client(events)
@@ -381,7 +456,7 @@ async def test_websocket_no_events_on_connect(setup_client):
     expected_result = EndEvent(failed=False, msg="Test message")
 
     with client.websocket_connect(
-        f"/experiment_server/events/{experiment_id}",
+        f"/experiment_runs/events/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     ) as websocket:
 
@@ -404,7 +479,7 @@ def test_that_get_status_returns_successfully(setup_client):
     credentials = b64encode(b"username:password").decode()
 
     response = client.get(
-        "/experiment_server/",
+        "/experiment_runs/",
         headers={"Authorization": f"Basic {credentials}"},
     )
     assert response.status_code == 200
@@ -440,7 +515,7 @@ def test_that_get_status_by_experiment_id_endpoint_returns_expected_response(
     client, _, valid_experiment_id = setup_client()
 
     response = client.get(
-        f"/experiment_server/status/{experiment_id or valid_experiment_id}",
+        f"/experiment_runs/status/{experiment_id or valid_experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     )
     assert response.status_code == expected_status_code
@@ -454,7 +529,7 @@ def test_that_get_config_path_returns_not_found_for_pending_experiment_state(
     credentials = b64encode(b"username:password").decode()
 
     response = client.get(
-        f"/experiment_server/config_path/{experiment_id}",
+        f"/experiment_runs/config_path/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     )
     assert response.status_code == 404
@@ -470,7 +545,7 @@ def test_that_get_config_path_returns_successfully_for_running_experiment(
     assert experiment_id in _experiments
     _experiments[experiment_id].status.status = ExperimentState.running
     response = client.get(
-        f"/experiment_server/config_path/{experiment_id}",
+        f"/experiment_runs/config_path/{experiment_id}",
         headers={"Authorization": f"Basic {credentials}"},
     )
     assert response.status_code == 200
@@ -485,7 +560,7 @@ def test_that_experiment_stop_endpoint_returns_successfully(setup_client):
     credentials = b64encode(b"username:password").decode()
 
     response = client.post(
-        "/experiment_server/stop",
+        "/experiment_runs/stop",
         headers={"Authorization": f"Basic {credentials}"},
     )
 
@@ -510,7 +585,7 @@ def test_that_experiment_stop_endpoint_correctly_shuts_down_server(setup_client)
         signal(SIGTERM, handler)
 
         _ = client.post(
-            "/experiment_server/stop",
+            "/experiment_runs/stop",
             headers={"Authorization": f"Basic {credentials}"},
         )
 

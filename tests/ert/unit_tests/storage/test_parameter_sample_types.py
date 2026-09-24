@@ -15,7 +15,7 @@ from ert.sample_prior import sample_prior
 from ert.storage import open_storage
 from ert.storage.local_ensemble import load_parameters_and_responses_from_runpath
 
-from .create_runpath import create_runpath
+from .create_runpath import _create_runpath as create_runpath
 
 
 @pytest.fixture
@@ -181,7 +181,7 @@ async def test_initialize_random_seed(
 
         # Make a clean directory for the second case, which is identical
         # to the first, except that it uses the random seed from the first
-        os.makedirs("second")
+        Path("second").mkdir(parents=True)
         os.chdir("second")  # ruff: ignore[banned-api]  inside tmpdir.as_cwd() which restores
         random_seed = (
             next(

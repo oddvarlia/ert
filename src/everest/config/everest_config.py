@@ -32,7 +32,11 @@ from ruamel.yaml import YAML, YAMLError
 from ruamel.yaml.nodes import ScalarNode
 from ruamel.yaml.representer import Representer
 
-from ert.base_model_context import BaseModelWithContextSupport, use_runtime_plugins
+from ert.base_model_context import (
+    BaseModelWithContextSupport,
+    get_runtime_plugins,
+    use_runtime_plugins,
+)
 from ert.config import (
     ConfigWarning,
     EverestConstraintsConfig,
@@ -574,8 +578,9 @@ class EverestConfig(BaseModelWithContextSupport):
         if not forward_model_jobs:
             return self
         installed_jobs_name = [job.name for job in install_jobs]
-        if info.context:  # Add plugin jobs
-            installed_jobs_name += info.context.installed_forward_model_steps.keys()
+        runtime_plugins = get_runtime_plugins(info)
+        if runtime_plugins:  # Add plugin jobs
+            installed_jobs_name += runtime_plugins.installed_forward_model_steps.keys()
 
         errors = []
         for fm_job in forward_model_jobs:
@@ -646,15 +651,16 @@ class EverestConfig(BaseModelWithContextSupport):
                 executable = Path(job.executable)
                 if not executable.is_absolute():
                     executable = self.config_directory / executable
-                if not executable.exists():
+                if executable.exists():
+                    if executable.is_dir():
+                        errors.append(
+                            "Expected executable file, "
+                            f"but {job.executable!r} is a directory"
+                        )
+                    elif not os.access(executable, os.X_OK):
+                        errors.append(f"File not executable: {job.executable!r}")
+                else:
                     errors.append(f"Could not find executable: {job.executable!r}")
-                if executable.is_dir():
-                    errors.append(
-                        "Expected executable file, "
-                        f"but {job.executable!r} is a directory"
-                    )
-                if not os.access(executable, os.X_OK):
-                    errors.append("File not executable: {job.executable!r}")
             return errors
 
         errors = []
@@ -746,34 +752,6 @@ to read summary data from forward model, do:
 
         if len(errors) > 0:  # Revisit when pydantic supports ExceptionGroup.
             raise ValueError(errors)
-
-        return self
-
-    @model_validator(mode="after")
-    def validate_cvar_nreals_interval(self) -> Self:
-        optimization = self.optimization
-        if not optimization:
-            return self
-
-        cvar = optimization.cvar
-
-        if not cvar:
-            return self
-
-        nreals = cvar.number_of_realizations
-        model = self.model
-
-        if (
-            cvar
-            and nreals is not None
-            and model is not None
-            and not (0 < nreals < len(model.realizations))
-        ):
-            raise ValueError(
-                f"number_of_realizations: (got {nreals}) was"
-                f" expected to be between 0 and number of realizations specified "
-                f"in model config: {len(model.realizations)}"
-            )
 
         return self
 
@@ -910,7 +888,7 @@ to read summary data from forward model, do:
     @field_validator("objective_functions")
     @no_type_check
     @classmethod
-    def validate_objective_function_weights_for_all_or_none(cls, functions):
+    def validate_objective_function_weights_for_all_or_none(cls, functions):  # ruff: ignore[missing-type-function-argument]
         objective_names = [function.name for function in functions]
         weights = [
             function.weight for function in functions if function.weight is not None
@@ -933,7 +911,7 @@ to read summary data from forward model, do:
     @field_validator("config_path")
     @no_type_check
     @classmethod
-    def validate_config_path_exists_and_is_writeable(cls, config_path):
+    def validate_config_path_exists_and_is_writeable(cls, config_path):  # ruff: ignore[missing-type-function-argument]
         """
         `os.path.exists()` swallows all OSErrors instead returning false.
         `Path.exists()` only shares this behavior for `>py-3.12`.

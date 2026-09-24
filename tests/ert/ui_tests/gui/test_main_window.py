@@ -1,6 +1,5 @@
 import contextlib
 import logging
-import os
 import shutil
 import stat
 from pathlib import Path
@@ -14,7 +13,6 @@ from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QLabel,
     QMenuBar,
     QMessageBox,
@@ -34,9 +32,9 @@ from ert.gui.ertwidgets import (
     StringBox,
     Suggestor,
 )
-from ert.gui.ertwidgets.analysismodulevariablespanel import AnalysisModuleVariablesPanel
 from ert.gui.ertwidgets.suggestor._suggestor_message import SuggestorMessage
 from ert.gui.experiments import ExperimentPanel, RunDialog
+from ert.gui.experiments.combobox_with_description import GROUP_TITLE_ROLE
 from ert.gui.main import ErtMainWindow, GUILogHandler, _setup_main_window
 from ert.gui.main_window import SidebarToolButton
 from ert.gui.plotting.plot_window import (
@@ -58,7 +56,7 @@ from ert.run_models import (
 )
 from ert.services import ErtServerController
 from ert.storage import open_storage
-from tests.ert.handle_run_path_dialog import handle_run_path_dialog
+from tests.ert.handle_runpath_dialog import handle_runpath_dialog
 
 from .conftest import (
     add_experiment_manually,
@@ -113,10 +111,13 @@ def test_that_the_ui_show_no_errors_and_enables_update_for_poly_example(qapp):
     with add_gui_log_handler() as log_handler:
         gui, *_ = ert.gui.main._start_initial_gui_window(args, log_handler)
         combo_box = get_child(gui, QComboBox, name="experiment_type")
-        assert combo_box.count() == 7
+        assert combo_box.count() == 9
 
         for i in range(combo_box.count()):
-            assert combo_box.model().item(i).isEnabled()
+            assert combo_box.model().item(i).isEnabled() == (
+                combo_box.itemData(i, GROUP_TITLE_ROLE) is None
+            )
+        assert combo_box.currentText() == SingleTestRun.display_name()
 
         assert gui.windowTitle().startswith("ERT - poly.ert")
 
@@ -133,18 +134,18 @@ def test_gui_shows_a_warning_and_disables_update_when_there_are_no_observations(
     with add_gui_log_handler() as log_handler:
         gui, *_ = ert.gui.main._start_initial_gui_window(args, log_handler)
         combo_box = get_child(gui, QComboBox, name="experiment_type")
-        assert combo_box.count() == 7
+        assert combo_box.count() == 9
 
-        for i in range(3):
+        for i in range(1, 4):
             assert combo_box.model().item(i).isEnabled()
-        for i in range(3, 5):
+        for i in (0, *range(4, 9)):
             assert not combo_box.model().item(i).isEnabled()
 
         assert gui.windowTitle().startswith("ERT - config.ert")
 
 
 @pytest.mark.usefixtures("copy_poly_case")
-def test_gui_shows_a_warning_and_disables_update_when_parameters_are_missing(qapp):
+def test_that_esmda_remains_selectable_when_parameters_are_missing(qapp):
     with (
         Path("poly.ert").open(encoding="utf-8") as fin,
         Path("poly-no-gen-kw.ert").open("w", encoding="utf-8") as fout,
@@ -159,11 +160,12 @@ def test_gui_shows_a_warning_and_disables_update_when_parameters_are_missing(qap
     with add_gui_log_handler() as log_handler:
         gui, *_ = ert.gui.main._start_initial_gui_window(args, log_handler)
         combo_box = get_child(gui, QComboBox, name="experiment_type")
-        assert combo_box.count() == 7
+        assert combo_box.count() == 9
 
-        for i in range(3):
+        esmda_index = 5
+        for i in (*range(1, 4), esmda_index):
             assert combo_box.model().item(i).isEnabled()
-        for i in range(3, 5):
+        for i in (0, 4, *range(esmda_index + 1, 9)):
             assert not combo_box.model().item(i).isEnabled()
 
         assert gui.windowTitle().startswith("ERT - poly-no-gen-kw.ert")
@@ -216,7 +218,7 @@ def test_that_the_run_workflow_tool_is_enabled_when_there_are_workflows(
         ert_file.write("LOAD_WORKFLOW_JOB workflows/UBER_PRINT print_uber\n")
         ert_file.write("LOAD_WORKFLOW workflows/MAGIC_PRINT magic_print\n")
 
-    os.mkdir(tmp_path / "workflows")
+    (tmp_path / "workflows").mkdir()
 
     (tmp_path / "workflows/MAGIC_PRINT").write_text("print_uber\n", encoding="utf-8")
     (tmp_path / "workflows/UBER_PRINT").write_text("EXECUTABLE ls\n", encoding="utf-8")
@@ -239,7 +241,7 @@ def test_that_es_mda_is_disabled_when_weights_are_invalid(qtbot):
         assert gui.windowTitle().startswith("ERT - poly.ert")
 
         combo_box = get_child(gui, QComboBox, name="experiment_type")
-        combo_box.setCurrentIndex(3)
+        combo_box.setCurrentText(MultipleDataAssimilation.display_name())
 
         assert combo_box.currentText() == MultipleDataAssimilation.display_name()
 
@@ -350,12 +352,12 @@ def test_that_the_plot_window_contains_the_expected_elements(
         } == {
             "Cross ensemble statistics",
             "Distribution",
-            "Gaussian KDE",
             "Ensemble",
             "Histogram",
             "Statistics",
             "Std dev",
             "Misfits",
+            "Waterfall",
         }
 
         model = data_keys.model()
@@ -490,29 +492,6 @@ def test_that_the_manage_experiments_tool_can_be_used(esmda_has_run, qtbot):
     qtbot.mouseClick(initialize_button, Qt.MouseButton.LeftButton)
 
 
-def test_that_truncation_can_be_set_from_gui(qtbot, opened_main_window_poly):
-    gui = opened_main_window_poly
-
-    sim_mode = get_child(gui, QWidget, name="experiment_type")
-    qtbot.keyClick(sim_mode, Qt.Key.Key_Down)
-    es_panel = get_child(gui, QWidget, name="ensemble_smoother_panel")
-    es_edit = get_child(es_panel, QWidget, name="ensemble_smoother_edit")
-
-    # Testing modal dialogs requires some care.
-    # https://github.com/pytest-dev/pytest-qt/issues/256
-    def handle_analysis_module_panel():
-        var_panel = wait_for_child(gui, qtbot, AnalysisModuleVariablesPanel)
-        spinner = wait_for_child(var_panel, qtbot, QDoubleSpinBox, "enkf_truncation")
-        assert spinner.isEnabled()
-
-        var_panel.parent().close()
-
-    QTimer.singleShot(500, handle_analysis_module_panel)
-    qtbot.mouseClick(
-        get_child(es_edit, QPushButton), Qt.MouseButton.LeftButton, delay=1
-    )
-
-
 def test_that_the_manage_experiments_tool_can_be_used_with_clean_storage(
     opened_main_window_poly, qtbot
 ):
@@ -576,7 +555,8 @@ def test_that_a_failing_job_shows_error_message_with_context(
     gui = opened_main_window_poly
 
     # break poly eval script so realz fail
-    Path("poly_eval.py").write_text(
+    poly_py = Path("poly_eval.py")
+    poly_py.write_text(
         dedent(
             """\
                 #!/usr/bin/env python
@@ -587,9 +567,7 @@ def test_that_a_failing_job_shows_error_message_with_context(
         ),
         encoding="utf-8",
     )
-    Path("poly_eval.py").chmod(
-        os.stat("poly_eval.py").st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-    )
+    poly_py.chmod(poly_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     with contextlib.suppress(FileNotFoundError):
         shutil.rmtree("poly_out")
@@ -741,8 +719,8 @@ def test_that_es_mda_select_prior_run_box_is_disabled_when_there_are_no_valid_ca
 
     combo_box = get_child(gui, QComboBox, name="experiment_type")
     qtbot.mouseClick(combo_box, Qt.MouseButton.LeftButton)
-    assert combo_box.count() == 7
-    combo_box.setCurrentIndex(3)
+    assert combo_box.count() == 9
+    combo_box.setCurrentText(MultipleDataAssimilation.display_name())
 
     assert combo_box.currentText() == MultipleDataAssimilation.display_name()
 
@@ -882,7 +860,7 @@ def test_that_simulation_status_button_adds_menu_on_subsequent_runs(
         "button_Start_experiment", should_click=True, expected_enabled_state=True
     )
     QTimer.singleShot(
-        500, lambda: handle_run_path_dialog(gui, qtbot, delete_run_path=True)
+        500, lambda: handle_runpath_dialog(gui, qtbot, delete_runpath=True)
     )
     run_experiment()
     wait_for_simulation_completed()
@@ -894,7 +872,7 @@ def test_that_simulation_status_button_adds_menu_on_subsequent_runs(
         "button_Start_experiment", should_click=True, expected_enabled_state=True
     )
     QTimer.singleShot(
-        500, lambda: handle_run_path_dialog(gui, qtbot, delete_run_path=True)
+        500, lambda: handle_runpath_dialog(gui, qtbot, delete_runpath=True)
     )
     run_experiment()
     wait_for_simulation_completed()
@@ -996,15 +974,15 @@ def test_warnings_from_forward_model_are_propagated_to_ert_main_window_post_simu
         encoding="utf-8",
     )
 
-    script_file = "warning.py"
+    script_file = Path("warning.py")
     script_file_content = """#!/usr/bin/env python
 import warnings
 warnings.warn('Foobar')"""
 
-    Path(script_file).write_text(dedent(script_file_content), encoding="utf-8")
+    script_file.write_text(dedent(script_file_content), encoding="utf-8")
 
-    Path(script_file).chmod(
-        os.stat(script_file).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    script_file.chmod(
+        script_file.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
     )
 
     config_file = "config.ert"
@@ -1061,7 +1039,7 @@ warnings.warn('Foobar')"""
     assert run_dialog.fail_msg_box.isVisible()
 
 
-def test_denied_run_path_warning_dialog_releases_storage_lock(
+def test_denied_runpath_warning_dialog_releases_storage_lock(
     qtbot, opened_main_window_poly, use_tmpdir, monkeypatch
 ):
     # Populate runpath

@@ -1,6 +1,5 @@
 import contextlib
 import os
-import os.path
 import shutil
 import sys
 from contextlib import suppress
@@ -67,7 +66,7 @@ def test_symlink():
     Path("target").write_text("target ...", encoding="utf-8")
 
     symlink("target", "link")
-    assert os.path.islink("link")
+    assert Path("link").is_symlink()
     assert os.readlink("link") == "target"
 
     Path("target2").write_text("target ...", encoding="utf-8")
@@ -76,33 +75,33 @@ def test_symlink():
         symlink("target2", "target")
 
     symlink("target2", "link")
-    assert os.path.islink("link")
+    assert Path("link").is_symlink()
     assert os.readlink("link") == "target2"
 
-    os.makedirs("root1/sub1/sub2")
-    os.makedirs("root2/sub1/sub2")
-    os.makedirs("run")
+    Path("root1/sub1/sub2").mkdir(parents=True)
+    Path("root2/sub1/sub2").mkdir(parents=True)
+    Path("run").mkdir(parents=True)
 
     symlink("../target", "linkpath/link")
-    assert os.path.isdir("linkpath")
-    assert os.path.islink("linkpath/link")
+    assert Path("linkpath").is_dir()
+    assert Path("linkpath/link").is_symlink()
 
     symlink("../target", "linkpath/link")
-    assert os.path.isdir("linkpath")
-    assert os.path.islink("linkpath/link")
+    assert Path("linkpath").is_dir()
+    assert Path("linkpath/link").is_symlink()
 
 
 @pytest.mark.usefixtures("use_tmpdir")
 def test_symlink2():
-    os.makedirs("path")
+    Path("path").mkdir(parents=True)
     Path("path/target").write_text("1234", encoding="utf-8")
 
     symlink("path/target", "link")
-    assert os.path.islink("link")
+    assert Path("link").is_symlink()
     assert Path("path/target").is_file()
 
     symlink("path/target", "link")
-    assert os.path.islink("link")
+    assert Path("link").is_symlink()
     assert Path("path/target").is_file()
 
     assert Path("link").read_text(encoding="utf-8") == "1234"
@@ -116,11 +115,11 @@ def test_mkdir():
         mkdir("file")
 
     mkdir("path")
-    assert os.path.isdir("path")
+    assert Path("path").is_dir()
     mkdir("path")
 
     mkdir("path/subpath")
-    assert os.path.isdir("path/subpath")
+    assert Path("path/subpath").is_dir()
 
 
 @pytest.mark.usefixtures("use_tmpdir")
@@ -405,7 +404,7 @@ def test_copy_directory_errors_when_symlinks_point_nowhere():
     somedir = "somedir"
     some_symlink = f"{somedir}/some_symlink"
     Path(somedir).mkdir()
-    os.symlink("/not_existing", some_symlink)
+    Path(some_symlink).symlink_to("/not_existing")
     with pytest.raises(OSError, match=f"No such file or directory: '{some_symlink}'"):
         copy_directory(somedir, "copydir")
 
@@ -417,8 +416,8 @@ def test_copy_directory_reports_multiple_errors():
     some_other_symlink = f"{somedir}/some_other_symlink"
 
     Path(somedir).mkdir()
-    os.symlink("/not_existing", some_symlink)
-    os.symlink("/not_existing", some_other_symlink)
+    Path(some_symlink).symlink_to("/not_existing")
+    Path(some_other_symlink).symlink_to("/not_existing")
     with pytest.raises(OSError, match="No such file or directory") as exc_info:
         copy_directory(somedir, "copydir")
 

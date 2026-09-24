@@ -1,19 +1,19 @@
 #!/usr/bin/env python
-import os
 import sys
+from pathlib import Path
 
 
 def mkdir(path: str) -> None:
-    if os.path.isdir(path):
+    if Path(path).is_dir():
         print(f"OK - directory: '{path}' already exists")
     else:
         try:
-            os.makedirs(path)
+            Path(path).mkdir(parents=True)
             print(f"Created directory: '{path}'")
         except OSError as error:
             # Seems in many cases the directory just suddenly appears;
             # synchronization issues?
-            if not os.path.isdir(path):
+            if not Path(path).is_dir():
                 msg = f'ERROR: Failed to create directory "{path}": {error}.'
                 raise OSError(msg) from error
 

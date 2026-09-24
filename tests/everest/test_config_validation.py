@@ -43,37 +43,6 @@ def test_that_sampler_config_with_wrong_method():
         SamplerConfig(backend="scipy", method="hey")
 
 
-def test_that_cvar_attrs_are_mutex():
-    cvar = {"percentile": 0.1, "number_of_realizations": 3}
-    with pytest.raises(ValueError, match="Invalid CVaR section"):
-        everest_config_with_defaults(optimization={"cvar": cvar})
-
-
-@pytest.mark.parametrize("nreals", [-1, 0, 8])
-def test_that_cvar_nreals_interval_outside_range_errors(nreals):
-    with pytest.raises(ValueError, match=f"number_of_realizations: \\(got {nreals}"):
-        everest_config_with_defaults(
-            optimization={
-                "cvar": {
-                    "number_of_realizations": nreals,
-                }
-            },
-            model={"realizations": [1, 2, 3, 4, 5, 6]},
-        )
-
-
-@pytest.mark.parametrize("nreals", [1, 2, 3, 4, 5])
-def test_that_cvar_nreals_valid_doesnt_error(nreals):
-    everest_config_with_defaults(
-        optimization={
-            "cvar": {
-                "number_of_realizations": nreals,
-            }
-        },
-        model={"realizations": [1, 2, 3, 4, 5, 6]},
-    )
-
-
 def test_that_max_runtime_errors_only_on_negative():
     with pytest.raises(ValueError, match=r".*greater than or equal to 0"):
         everest_config_with_defaults(simulator={"max_runtime": -1})
@@ -793,7 +762,7 @@ def test_that_either_source_or_executable_is_provided(install_keyword):
     ):
         everest_config_with_defaults(
             model={"realizations": [1, 2, 3]},
-            config_path=Path("."),
+            config_path=Path(),
             **{install_keyword: [{"name": "test"}]},
         )
 
@@ -849,7 +818,7 @@ def test_that_existing_install_job_with_malformed_executable_errors_deprecated(
             model={
                 "realizations": [1, 2, 3],
             },
-            config_path=Path("."),
+            config_path=Path(),
             **{
                 install_keyword: [
                     {"name": "test", "source": "malformed.ert"},
@@ -880,10 +849,11 @@ def test_that_existing_install_job_with_non_executable_executable_errors_depreca
         """
         )
 
-    with Path("non_executable").open("w+", encoding="utf-8") as f:
+    non_executable = Path("non_executable")
+    with non_executable.open("w+", encoding="utf-8") as f:
         f.write("bla")
 
-    Path("non_executable").chmod(os.stat("non_executable").st_mode & ~0o111)
+    non_executable.chmod(non_executable.stat().st_mode & ~0o111)
     assert not os.access("non_executable", os.X_OK)
 
     with pytest.warns(
@@ -893,7 +863,7 @@ def test_that_existing_install_job_with_non_executable_executable_errors_depreca
             model={
                 "realizations": [1, 2, 3],
             },
-            config_path=Path("."),
+            config_path=Path(),
             **{
                 install_keyword: [
                     {"name": "test", "source": "exec.ert"},
@@ -915,10 +885,11 @@ def test_that_existing_install_job_with_non_executable_executable_errors_depreca
 def test_that_existing_install_job_with_non_executable_executable_errors(
     install_keyword, change_to_tmpdir
 ):
-    with Path("non_executable").open("w+", encoding="utf-8") as f:
+    non_executable = Path("non_executable")
+    with non_executable.open("w+", encoding="utf-8") as f:
         f.write("bla")
 
-    Path("non_executable").chmod(os.stat("non_executable").st_mode & ~0o111)
+    non_executable.chmod(non_executable.stat().st_mode & ~0o111)
     assert not os.access("non_executable", os.X_OK)
 
     with pytest.raises(ValidationError, match="File not executable"):
@@ -926,7 +897,7 @@ def test_that_existing_install_job_with_non_executable_executable_errors(
             model={
                 "realizations": [1, 2, 3],
             },
-            config_path=Path("."),
+            config_path=Path(),
             **{
                 install_keyword: [
                     {"name": "test", "executable": "non_executable"},
@@ -946,10 +917,8 @@ def test_that_existing_install_job_with_non_existing_executable_errors_deprecate
     install_keyword, change_to_tmpdir
 ):
     with Path("exec.ert").open("w+", encoding="utf-8") as f:
-        f.write(
-            """EXECUTABLE non_existing
-        """
-        )
+        f.write("""EXECUTABLE non_existing
+        """)
 
     assert not os.access("non_executable", os.X_OK)
 
@@ -960,7 +929,7 @@ def test_that_existing_install_job_with_non_existing_executable_errors_deprecate
             model={
                 "realizations": [1, 2, 3],
             },
-            config_path=Path("."),
+            config_path=Path(),
             **{
                 install_keyword: [
                     {"name": "test", "source": "exec.ert"},
@@ -989,7 +958,7 @@ def test_that_existing_install_job_with_non_existing_executable_errors(
             model={
                 "realizations": [1, 2, 3],
             },
-            config_path=Path("."),
+            config_path=Path(),
             **{
                 install_keyword: [
                     {"name": "test", "executable": "non_executable"},

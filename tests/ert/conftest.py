@@ -13,6 +13,7 @@ from importlib.resources import files
 from io import BytesIO, StringIO
 from pathlib import Path
 from textwrap import dedent
+from urllib.parse import quote
 
 import numpy as np
 import polars as pl
@@ -23,6 +24,7 @@ from hypothesis import strategies as st
 from lark import Token
 from PyQt6.QtCore import QDir
 from PyQt6.QtWidgets import QApplication
+from starlette.testclient import TestClient
 from xlsxwriter import Workbook
 
 import _ert.forward_model_runner.fm_dispatch
@@ -31,6 +33,8 @@ from ert.__main__ import ert_parser
 from ert.cli.main import run_cli
 from ert.config import ConfigWarning, ErtConfig
 from ert.config.parsing.file_context_token import FileContextToken
+from ert.config.rft_config import _get_zonemap, _read_egrid
+from ert.dark_storage.app import app
 from ert.ensemble_evaluator.config import EvaluatorServerConfig
 from ert.mode_definitions import (
     ENIF_MODE,
@@ -38,11 +42,38 @@ from ert.mode_definitions import (
     ENSEMBLE_SMOOTHER_MODE,
     ES_MDA_MODE,
 )
+from ert.services import ert_client
+from ert.services.ert_client import ErtClient
 from ert.storage import open_storage
 
 from .utils import SOURCE_DIR
 
 st.register_type_strategy(Path, st.builds(Path, st.text().map(lambda x: "/tmp/" + x)))
+
+
+@pytest.fixture
+def patch_ertclient_to_testclient(monkeypatch):
+    client = TestClient(app)
+
+    class TestClientAdapter:
+        def request(self, method, url, **kwargs):
+            kwargs.pop("timeout", None)
+            return client.request(method, url, **kwargs)
+
+    monkeypatch.setattr(
+        ErtClient,
+        "get_client",
+        classmethod(lambda cls, *args, **kwargs: cls(TestClientAdapter())),
+    )
+
+    def test_escape(s: str) -> str:
+        """
+        Workaround for issue with TestClient:
+        https://github.com/encode/starlette/issues/1060
+        """
+        return quote(quote(quote(s, safe="")))
+
+    monkeypatch.setattr(ert_client, "_escape", test_escape)
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +97,18 @@ def log_check():
 def _reraise_thread_exceptions_on_main_thread():
     """Allow `_ert.threading.ErtThread` to re-raise exceptions on main thread"""
     set_signal_handler()
+
+
+@pytest.fixture(autouse=True)
+def _clear_rft_caches():
+    """Reset the module-level EGRID and zonemap caches so cached entries from
+    previous tests do not leak into tests that expect a missing or different file.
+    """
+    _read_egrid.cache_clear()
+    _get_zonemap.cache_clear()
+    yield
+    _read_egrid.cache_clear()
+    _get_zonemap.cache_clear()
 
 
 @pytest.fixture
@@ -242,7 +285,8 @@ def copy_poly_case_with_design_matrix(copy_case):
             encoding="utf-8",
         )
 
-        Path("poly_eval.py").write_text(
+        poly_py = Path("poly_eval.py")
+        poly_py.write_text(
             dedent(
                 """\
                     #!/usr/bin/env python
@@ -266,8 +310,8 @@ def copy_poly_case_with_design_matrix(copy_case):
             encoding="utf-8",
         )
 
-        Path("poly_eval.py").chmod(
-            os.stat("poly_eval.py").st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        poly_py.chmod(
+            poly_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
         )
 
     return _create_poly_design_case
@@ -309,14 +353,14 @@ def fixture_copy_snake_oil_case_storage(_shared_snake_oil_case, tmp_path, monkey
 @pytest.fixture
 def symlink_snake_oil_case_storage(_shared_snake_oil_case, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    os.symlink(_shared_snake_oil_case, "test_data")
+    Path("test_data").symlink_to(_shared_snake_oil_case)
     monkeypatch.chdir("test_data")
 
 
 @pytest.fixture
 def symlink_heat_equation_storage_es(_shared_heat_equation_es, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    os.symlink(_shared_heat_equation_es, "heat_equation")
+    Path("heat_equation").symlink_to(_shared_heat_equation_es)
     monkeypatch.chdir("heat_equation")
 
 
@@ -325,7 +369,7 @@ def symlink_heat_equation_storage_esmda(
     _shared_heat_equation_esmda, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    os.symlink(_shared_heat_equation_esmda, "heat_equation")
+    Path("heat_equation").symlink_to(_shared_heat_equation_esmda)
     monkeypatch.chdir("heat_equation")
 
 
@@ -334,18 +378,13 @@ def symlink_heat_equation_storage_enif(
     _shared_heat_equation_enif, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    os.symlink(_shared_heat_equation_enif, "heat_equation_enif")
+    Path("heat_equation_enif").symlink_to(_shared_heat_equation_enif)
     monkeypatch.chdir("heat_equation_enif")
 
 
 @pytest.fixture
 def copy_minimum_case(copy_case):
     copy_case("simple_config")
-
-
-@pytest.fixture
-def use_tmpdir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture(scope="session", autouse=True)

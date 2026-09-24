@@ -1,5 +1,5 @@
 import logging
-import os.path
+from pathlib import Path
 from textwrap import dedent
 
 import hypothesis.strategies as st
@@ -50,7 +50,7 @@ def test_analysis_config_from_file_is_same_as_from_dict(monkeypatch, tmp_path):
             ],
             ConfigKeys.DESIGN_MATRIX: [
                 [
-                    os.path.abspath("my_design_matrix.xlsx"),
+                    str(Path("my_design_matrix.xlsx").resolve()),
                     {
                         "DESIGN_SHEET": "my_sheet",
                         "DEFAULT_SHEET": "my_default_sheet",
@@ -110,7 +110,7 @@ def test_merging_ignores_identical_design_matrices(tmp_path, monkeypatch, caplog
             ],
         }
     )
-    assert "Duplicate DESIGN_MATRIX entries DesignMatrix(xls_filename=" in caplog.text
+    assert "Duplicate DESIGN_MATRIX entries DesignMatrix(filename=" in caplog.text
     assert "only reading once." in caplog.text
 
 
@@ -159,17 +159,21 @@ def test_invalid_min_realization_raises_config_validation_error():
         )
 
 
-def test_invalid_design_matrix_format_raises_validation_error():
+@pytest.mark.parametrize("extension", ["txt", "xls"])
+def test_that_design_matrix_rejects_non_xlsx_files(extension):
     with pytest.raises(
         ConfigValidationError,
-        match="DESIGN_MATRIX must be of format \\.xls or \\.xlsx; is 'my_matrix\\.txt'",
+        match=(
+            r"DESIGN_MATRIX must have file extension \.xlsx; "
+            rf"is 'my_matrix\.{extension}'"
+        ),
     ):
         AnalysisConfig.from_dict(
             {
                 ConfigKeys.NUM_REALIZATIONS: 1,
                 ConfigKeys.DESIGN_MATRIX: [
                     [
-                        "my_matrix.txt",
+                        f"my_matrix.{extension}",
                         {
                             "DESIGN_SHEET": "sheet1",
                             "DEFAULT_SHEET": "sheet2",
@@ -387,6 +391,10 @@ def test_that_invalid_inversion_value_gives_error(config):
     [
         ([["OBSERVATIONS", "AUTO_SCALE", "OBS_*"]], [["OBS_*"]]),
         ([["OBSERVATIONS", "AUTO_SCALE", "ONE,TWO"]], [["ONE", "TWO"]]),
+        (
+            [["OBSERVATIONS", "AUTO_SCALE", "ONE, TWO ,   THREE"]],
+            [["ONE", "TWO", "THREE"]],
+        ),
         (
             [
                 ["OBSERVATIONS", "AUTO_SCALE", "OBS_*"],

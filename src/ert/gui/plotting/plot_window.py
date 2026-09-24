@@ -46,6 +46,7 @@ from ert.gui.plotting.utils.plot_maps import (
     SHARED_PLOT_MAP,
     STATISTICS,
     STD_DEV,
+    WATERFALL,
 )
 from ert.gui.plotting.widgets.plot_side_panel import PlotSidePanel
 from ert.gui.utils import is_everest_application
@@ -57,14 +58,13 @@ from .utils import PlotConfig, PlotContext
 from .utils.observation_locations import transform_observation_locations
 from .utils.plot_color_palettes import TABLEAU_10_COLOR_CYCLE
 from .utils.plot_types import ObservationPlotLocations
-from .utils.qt_creator import (
-    create_group_layout,
-)
+from .utils.qt_creator import create_group_layout
 from .widgets.collapsible_section import CollapsibleSection
 from .widgets.data_type_keys_widget import DataTypeKeysWidget
 from .widgets.everest_control_selection_widget import EverestControlSelectionWidget
 from .widgets.plot_controls import (
     BoxplotOptions,
+    DistributionOptions,
     EverestControlsPlotOptions,
     GeneralPlotOptions,
     StatisticsOptions,
@@ -166,7 +166,6 @@ class PlotWindow(QMainWindow):
         self.setWindowTitle(f"Plotting - {config_file}")
         self.activateWindow()
         self._preferred_ensemble_x_axis_format = PlotContext.INDEX_AXIS
-        self._ens_path = ens_path
         self._api = PlotApi(ens_path)
 
         self.local_version = get_storage_api_version()
@@ -309,6 +308,7 @@ class PlotWindow(QMainWindow):
             self._general_options.titleEditRequested.connect(self._edit_title)
             self._boxplot_options = BoxplotOptions(self.update_plot)
             self._statistics_options = StatisticsOptions(self.update_plot)
+            self._distribution_options = DistributionOptions(self.update_plot)
 
             right_container = QWidget()
             right_layout = create_group_layout(
@@ -319,6 +319,7 @@ class PlotWindow(QMainWindow):
                     self._everest_controls_group,
                     self._boxplot_options.get_widget(),
                     self._statistics_options.get_widget(),
+                    self._distribution_options.get_widget(),
                 ]
             )
             right_layout.addStretch(1)
@@ -329,6 +330,7 @@ class PlotWindow(QMainWindow):
             self._everest_controls_plot_options.get_widget().setVisible(False)
             self._boxplot_options.get_widget().setVisible(False)
             self._statistics_options.get_widget().setVisible(False)
+            self._distribution_options.get_widget().setVisible(False)
             self._data_type_keys_widget.selectDefault()
 
             self.setCentralWidget(self._central_tab)
@@ -418,6 +420,14 @@ class PlotWindow(QMainWindow):
         )
         self._statistics_options.get_widget().setVisible(plot_widget.name == STATISTICS)
         self._general_options.get_widget().setVisible(plot_widget.name != STD_DEV)
+        self._distribution_options.get_widget().setVisible(
+            plot_widget.name == DISTRIBUTION
+        )
+
+        if plot_widget.name == WATERFALL:
+            self._ensemble_selection_widget.set_maximum_ensemble_limit(1)
+        elif not self.is_everest:
+            self._ensemble_selection_widget.reset_maximum_ensemble_limit_to_default()
 
         is_gradient_plot = plot_widget.name == EVEREST_GRADIENTS_PLOT
         is_controls_plot = plot_widget.name == EVEREST_CONTROLS_PLOT
@@ -468,14 +478,18 @@ class PlotWindow(QMainWindow):
                 if isinstance(plot_widget._plotter, SelectableControlsPlotter):
                     plot_widget._plotter.set_selected_controls(selected_controls)
 
+            is_waterfall_plot = plot_widget.name == WATERFALL
+
             def fetch_data(
                 ensemble: EnsembleObject,
             ) -> tuple[EnsembleObject, pd.DataFrame | BaseException | None]:
                 try:  # ruff: ignore[too-many-statements-in-try-clause]
                     data = None
                     if is_gradient_plot:
-                        data = PlotApi.data_for_gradient(
-                            ensemble.id, key, self._ens_path
+                        data = self._api.data_for_gradient(ensemble.id, key)
+                    elif is_waterfall_plot and key_def.parameter is not None:
+                        data = self._api.data_for_waterfall(
+                            ensemble.id, key_def.parameter.name
                         )
                     elif (
                         key_def.response is not None
@@ -488,20 +502,18 @@ class PlotWindow(QMainWindow):
                             filter_on=key_def.filter_on,
                         )
                     elif is_controls_plot:
-                        data = PlotApi.data_for_controls(
+                        data = self._api.data_for_controls(
                             ensemble_id=ensemble.id,
                             parameter_keys=tuple(selected_controls)
                             or tuple(self._everest_parameters),
-                            ens_path=self._ens_path,
                         )
                     elif key_def.parameter is not None and (
                         key_def.parameter.type
                         in {"gen_kw", "everest_parameters", "everest_objective"}
                     ):
-                        data = PlotApi.data_for_parameter(
+                        data = self._api.data_for_parameter(
                             ensemble_id=ensemble.id,
                             parameter_key=key_def.parameter.name,
-                            ens_path=self._ens_path,
                         )
                 except BaseException as e:
                     return ensemble, e
@@ -596,6 +608,7 @@ class PlotWindow(QMainWindow):
             )
             self._boxplot_options.update_plot_context(plot_context)
             self._everest_controls_plot_options.update_plot_context(plot_context)
+            self._distribution_options.update_plot_context(plot_context)
 
             # Check if key is a history key.
             # If it is, it already has the data it needs.
@@ -730,6 +743,7 @@ class PlotWindow(QMainWindow):
             "everest_constraints",
             "everest_batch_objectives",
         }
+        plot_widget = cast(PlotWidget, self._central_tab.currentWidget())
         if self.is_everest:
             if key_def.response is not None and key_def.response.type in {
                 "summary",
@@ -776,7 +790,25 @@ class PlotWindow(QMainWindow):
             and (key_def.observations or not widget._plotter.requires_observations)
             and not is_everest_specific_widget
             and (not is_observed_seismic or widget.name == MISFITS)
+            and widget.name != WATERFALL
         ]
+
+        # Waterfall tab is only available for scalar parameters when at
+        # least one selected ensemble carries Kalman-gain blob data.
+        if (
+            not self.is_everest
+            and key_def.dimensionality == 1
+            and key_def.parameter is not None
+            and key_def.metadata.get("data_origin") == "gen_kw"
+        ):
+            selected = self._ensemble_selection_widget.get_selected_ensembles()
+            if any(self._api.has_kalman_gain(e.id) for e in selected):
+                waterfall_widget = next(
+                    (w for w in self._plot_widgets if w.name == WATERFALL),
+                    None,
+                )
+                if waterfall_widget is not None:
+                    available_widgets.append(waterfall_widget)
 
         def everest_data_origin_check(origin: list[str]) -> bool:
             return key_def.metadata.get("data_origin") in origin

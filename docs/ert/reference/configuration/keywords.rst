@@ -57,6 +57,7 @@ Keyword name                                                             Require
 :ref:`RUNPATH <runpath>`                                                 NO                                      realization-<IENS>/iter-<ITER>  Directory to run simulations; simulations/realization-<IENS>/iter-<ITER>
 :ref:`RUNPATH_FILE <runpath_file>`                                       NO                                      .ert_runpath_list               Name of file with path for all forward models that ERT has run. To be used by user defined scripts to find the realizations
 :ref:`RUN_TEMPLATE <run_template>`                                       NO                                                                      Install arbitrary files in the runpath directory
+:ref:`SEISMIC <seismic>`                                                 NO                                                                      Specify which Seismic data to load from fmu-sim2seis simulator output
 :ref:`SETENV <setenv>`                                                   NO                                                                      You can modify the UNIX environment with SETENV calls
 :ref:`STD_CUTOFF <std_cutoff>`                                           NO                                      1e-6                            Determines the threshold for ensemble variation in a measurement
 :ref:`STOP_LONG_RUNNING <stop_long_running>`                             NO                                      FALSE                           Stop long running realizations after minimum number of realizations (MIN_REALIZATIONS) have run
@@ -189,11 +190,11 @@ DESIGN_MATRIX is used to read and validate parameters given in XLSX-format.
         DESIGN_MATRIX poly_design.xlsx
 
 
-Additionally, there are three optional named arguments:
+Additionally, there are four optional named arguments:
 
 ::
 
-        DESIGN_MATRIX <file> DESIGN_SHEET:<name_of_design_sheet> DEFAULT_SHEET:<name_of_default_sheet> PRIORITY:<design_matrix|sampled>
+        DESIGN_MATRIX <file> DESIGN_SHEET:<name_of_design_sheet> DEFAULT_SHEET:<name_of_default_sheet> PRIORITY:<design_matrix|sampled> UPDATE:<TRUE|FALSE>
 
 where:
 
@@ -206,12 +207,19 @@ where:
    If set to `sampled`, parameters will be sampled normally overwriting values from :ref:`DESIGN_MATRIX  <design_matrix>`.
    Default is `design_matrix`.
 
+4. UPDATE:<TRUE|FALSE> - controls whether design matrix parameters are updated during the update step.
+   If set to `TRUE`, design matrix parameters participate in the update step and follow the update strategy configured for :ref:`GEN_KW <gen_kw>`.
+   If set to `FALSE` (default), design matrix parameters remain constant during the update step.
+
+   When a parameter name overlaps between DESIGN_MATRIX and GEN_KW, the PRIORITY setting determines which source's update behavior takes precedence.
+   Default is `FALSE`.
+
 
 *Example:*
 
 ::
 
-        DESIGN_MATRIX poly_design.xlsx DESIGN_SHEET:DesignSheet DEFAULT_SHEET:DefaultSheet PRIORITY:design_matrix
+        DESIGN_MATRIX poly_design.xlsx DESIGN_SHEET:DesignSheet DEFAULT_SHEET:DefaultSheet PRIORITY:design_matrix UPDATE:FALSE
 
 
 The XLSX file must contain a design sheet, where in the columns represents different parameters and rows represent realizations.
@@ -352,6 +360,64 @@ the final set of parameters (for example in parameters.txt in real==0) would be:
         COEFFS:d=7.8 <- sampled value
         e=1 <- design value
         COEFFS:f=5.7 <- sampled value
+
+
+*Example using UPDATE:TRUE and PRIORITY:*
+By default, design matrix parameters are held constant during the update step (``UPDATE:FALSE``).
+To make them participate in history matching, set ``UPDATE:TRUE`` on the :ref:`DESIGN_MATRIX <design_matrix>` keyword:
+
+::
+
+        GEN_KW COEFFS coeff_priors
+        DESIGN_MATRIX poly_design.xlsx DESIGN_SHEET:DesignSheet DEFAULT_SHEET:DefaultSheet PRIORITY:design_matrix UPDATE:TRUE
+
+With ``UPDATE:TRUE``, all design matrix parameters (a, b, c, d and e) will be updated during history matching,
+following the update strategy configured for :ref:`GEN_KW <gen_kw>` parameters, see :ref:`ANALYSIS_SET_VAR <analysis_set_var>`.
+The overlapping parameters b, c and d still take their values from the design matrix, since ``PRIORITY:design_matrix`` is set,
+but unlike the ``UPDATE:FALSE`` case above they are no longer held constant. In this case the final set of parameters
+(for example in parameters.txt in real==0) would be:
+::
+
+        a=1 <- design value, updated
+        b=1 <- design value, updated
+        c=2 <- design value, updated
+        d=0 <- design value, updated
+        e=1 <- design value, updated
+        COEFFS:f=5.7 <- sampled value, updated
+
+If ``PRIORITY:sampled`` is set instead, the overlapping parameters keep the ``UPDATE`` setting from their :ref:`GEN_KW <gen_kw>`
+distribution instead of the one set on ``DESIGN_MATRIX``:
+
+::
+
+        GEN_KW COEFFS coeff_priors
+        DESIGN_MATRIX poly_design.xlsx DESIGN_SHEET:DesignSheet DEFAULT_SHEET:DefaultSheet PRIORITY:sampled UPDATE:TRUE
+
+wherein coeff_priors
+
+::
+
+        b UNIFORM 0 1
+        c UNIFORM 0 2
+        d UNIFORM 0 5 UPDATE:FALSE
+        f UNIFORM 0 10
+
+the final set of parameters (for example in parameters.txt in real==0) would be:
+::
+
+        a=1 <- design value, updated
+        COEFFS:b=0.2 <- sampled value, updated
+        COEFFS:c=1.3 <- sampled value, updated
+        COEFFS:d=7.8 <- sampled value, not updated
+        e=1 <- design value, updated
+        COEFFS:f=5.7 <- sampled value, updated
+
+here b and c are updated because they use the default ``UPDATE:TRUE`` of :ref:`GEN_KW <gen_kw>`, d is held constant because
+``UPDATE:FALSE`` is set explicitly on it, and the non-overlapping design matrix parameters a and e are updated because
+``UPDATE:TRUE`` is set on ``DESIGN_MATRIX``.
+
+
+
 
 .. _design_matrix_notes:
 .. note::
@@ -1213,8 +1279,10 @@ history matching process. It must be set to either TRUE or FALSE. The parameters
 
         The ``INIT_FILES:`` named attribute that was used to provide externally sampled values has been removed from GEN_KW.
         To provide values sampled outside of ERT, please see :ref:`DESIGN_MATRIX <design_matrix>`.
-        Note that only parameters sampled internally in ERT will be updated during assisted history matching, and
-        parameters provided through ``DESIGN_MATRIX`` will be constant.
+        By default, parameters provided through ``DESIGN_MATRIX`` will be constant (UPDATE:FALSE).
+        To make design matrix parameters updatable during history matching, set UPDATE:TRUE.
+        When UPDATE:TRUE, design matrix parameters will follow the update strategy configured for :ref:`GEN_KW <gen_kw>`
+        (see :ref:`ANALYSIS_SET_VAR <analysis_set_var>`), unless they overlap with sampled parameters and PRIORITY:sampled is set.
 
 A configuration example is shown below:
 
@@ -1643,6 +1711,49 @@ located in a different zone than specified, it will be deactivated with a warnin
     Grid layers are 1-indexed in the ZONEMAP file. Multiple zone names can be
     specified for a single layer if it spans multiple geological zones.
 
+.. _seismic:
+
+SEISMIC
+-------
+
+The SEISMIC keyword is used to load seismic simulated results from `fmu-sim2seis
+<https://github.com/equinor/fmu-sim2seis>`_.
+
+The keyword requires a filepath to the simulation file. The filepath should be relative
+to the runpath and must have the extension ``.parquet`` or ``.csv``.
+
+All rows in the file will be loaded.
+
+The SEISMIC keyword can be repeated multiple times to load more than one file.
+
+*Example:*
+
+::
+
+        -- Load seismic results with two different monitor dates
+        SEISMIC share/results/tables/topvolantis--amplitude_full_min_depth--20190701_20180101.parquet
+        SEISMIC share/results/tables/topvolantis--amplitude_full_min_depth--20200701_20180101.parquet
+
+Loaded data can be compared with seismic observations. See: :ref:`SEISMIC_OBSERVATION
+<seismic_observation>`
+
+
+**Wildcard support:**
+
+The SEISMIC keyword supports wildcards (``*``) in the filenames (but not in the
+directory part of the filepath). This allows loading data from multiple paths at once:
+
+::
+
+        -- Load data from `.parquet` files with all monitor dates and calculations found in the directory:
+        SEISMIC share/results/tables/topvolantis--amplitude_full_*_depth--*_20180101.parquet
+
+        -- Load data from all `.parquet` files with provided base and monitor dates
+        SEISMIC share/results/tables/*20190701_20180101.parquet
+
+        -- Load files with literal * in the name, like top*volantis
+        SEISMIC my_data/top[*]volantis--amplitude_*.parquet
+
 
 .. _analysis_module:
 
@@ -1741,6 +1852,16 @@ you would like to only scale some observations, you can use wildcard matching:
 
 This will find correlations in all observations starting with: 'OBS_1' and scale those, then
 find correlations in all observations starting with: 'OBS_2', and scale those, independent of 'OBS_1*'
+
+If multiple observation patterns should be scaled together, list them on the same line separated
+by commas:
+
+.. code-block:: text
+
+    ANALYSIS_SET_VAR OBSERVATIONS AUTO_SCALE OBS_1*, OBS_2*
+
+This will find correlations across observations matching either ``OBS_1*`` or ``OBS_2*`` and
+scale them together as one group.
 
 .. _enkf_truncation:
 
@@ -2052,6 +2173,10 @@ The last argument must be one of the supported runtime step values:
 ::
 
    HOOK_WORKFLOW_JOB export_rft EXPORT_RFT some_path/rft.csv POST_SIMULATION
+
+Hooks declared with :code:`HOOK_WORKFLOW_JOB` and :code:`HOOK_WORKFLOW` share the
+same execution order at a given runtime step, which follows the order of
+declaration in the config file. See :ref:`automatically-run-workflows`.
 
 .. _load_workflow:
 

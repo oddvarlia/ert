@@ -15,11 +15,12 @@ def delete_file(filename: str | Path) -> None:
 
 
 def delete_empty_directory(dirname: str) -> None:
-    stat_info = os.stat(dirname)
-    uid = stat_info.st_uid
+    uid = Path(dirname).stat().st_uid
     if uid == os.getuid():
-        if os.path.islink(dirname):
-            os.remove(dirname)
+        # os.path.islink() is preferred over Path.is_symlink()
+        # due to handling of trailing slashes in filenames.
+        if os.path.islink(dirname):  # ruff: ignore[os-path-islink]
+            Path(dirname).unlink()
             print(f"Removing symbolic link:'{dirname}'")
         else:
             try:
@@ -41,9 +42,11 @@ def delete_empty_directory(dirname: str) -> None:
 def delete_directory(path: str) -> None:
     """Will ignore if you are not owner."""
     if Path(path).exists():
-        if os.path.isdir(path):
+        if Path(path).is_dir():
             for root, dirs, files in os.walk(path, topdown=False, followlinks=False):
-                if not os.path.islink(root):
+                # os.path.islink() is preferred over Path.is_symlink()
+                # due to handling of trailing slashes in filenames.
+                if not os.path.islink(root):  # ruff: ignore[os-path-islink]
                     for file in files:
                         delete_file(Path(root) / file)
 

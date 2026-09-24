@@ -30,6 +30,7 @@ from ert.mode_definitions import (
     ES_MDA_MODE,
     TEST_RUN_MODE,
 )
+from ert.run_models.event import WorkflowEvent
 from ert.sample_prior import sample_prior
 from ert.scheduler.driver import Driver
 from ert.scheduler.job import Job
@@ -480,14 +481,14 @@ def test_that_stop_on_fail_workflow_jobs_stop_ert(
     expect_stopped,
     monkeypatch,
 ):
-    script_name = f"failing_script.{file_extension}"
+    script = Path(f"failing_script.{file_extension}")
     monkeypatch.setattr(_ert.threading, "_can_raise", False)
 
     Path("failing_job").write_text(workflow_job_config_content, encoding="utf-8")
 
-    Path(script_name).write_text(script_content, encoding="utf-8")
+    script.write_text(script_content, encoding="utf-8")
 
-    Path(script_name).chmod(os.stat(script_name).st_mode | 0o111)
+    script.chmod(script.stat().st_mode | 0o111)
 
     Path("dump_failing_workflow").write_text("failjob", encoding="utf-8")
 
@@ -509,6 +510,50 @@ def test_that_stop_on_fail_workflow_jobs_stop_ert(
                 run_cli(TEST_RUN_MODE, "--disable-monitoring", "poly.ert")
         else:
             run_cli(TEST_RUN_MODE, "--disable-monitoring", "poly.ert")
+
+
+@pytest.mark.usefixtures("copy_poly_case")
+def test_that_workflow_output_is_written_to_experiment_in_storage():
+    Path("print_job").write_text("EXECUTABLE print_script.sh\n", encoding="utf-8")
+    print_sh = Path("print_script.sh")
+    print_sh.write_text(
+        dedent(
+            """\
+                #!/bin/bash
+                echo hello from the workflow
+                echo problem from the workflow >&2
+            """
+        ),
+        encoding="utf-8",
+    )
+    print_sh.chmod(print_sh.stat().st_mode | 0o111)
+    Path("print_workflow").write_text("printjob\n", encoding="utf-8")
+
+    with Path("poly.ert").open(mode="a", encoding="utf-8") as fh:
+        fh.write(
+            dedent(
+                """
+                   LOAD_WORKFLOW_JOB print_job printjob
+                   LOAD_WORKFLOW print_workflow wfprint
+                   HOOK_WORKFLOW wfprint PRE_SIMULATION
+                """
+            )
+        )
+
+    run_cli(TEST_RUN_MODE, "--disable-monitoring", "poly.ert")
+
+    with open_storage("storage", "r") as storage:
+        (experiment,) = storage.experiments
+        (line,) = experiment.workflow_events_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    event = WorkflowEvent.model_validate_json(line)
+    assert event.hook == "PRE_SIMULATION"
+    assert event.workflow_name == "wfprint"
+    assert event.job_name == "printjob"
+    assert event.job_index == 0
+    assert event.stdout == "hello from the workflow\n"
+    assert event.stderr == "problem from the workflow\n"
 
 
 @pytest.fixture(name="mock_cli_run")
@@ -821,7 +866,7 @@ def test_that_a_custom_eclrun_can_be_activated_through_setenv():
         ).strip(),
         encoding="utf-8",
     )
-    Path(eclrun).chmod(os.stat(eclrun).st_mode | stat.S_IEXEC)
+    eclrun.chmod(eclrun.stat().st_mode | stat.S_IEXEC)
 
     Path("FOO.DATA").touch()
     config_file = Path("config.ert")

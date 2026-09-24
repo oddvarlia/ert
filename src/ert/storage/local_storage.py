@@ -33,7 +33,7 @@ from .realization_storage_state import RealizationStorageState
 logger = logging.getLogger(__name__)
 
 
-_LOCAL_STORAGE_VERSION = 39
+_LOCAL_STORAGE_VERSION = 40
 
 
 def open_storage(
@@ -646,6 +646,7 @@ class LocalStorage(BaseMode):
             to37,
             to38,
             to39,
+            to40,
         )
 
         try:  # ruff: ignore[too-many-statements-in-try-clause]
@@ -657,7 +658,7 @@ class LocalStorage(BaseMode):
                 # migrate the blockfs storage
                 bkup_path = self.path / "_blockfs_backup"
                 dirs = set(os.listdir(self.path)) - {"storage.lock"}
-                os.mkdir(bkup_path)
+                bkup_path.mkdir()
                 for directory in dirs:
                     shutil.move(self.path / directory, bkup_path / directory)
 
@@ -669,7 +670,7 @@ class LocalStorage(BaseMode):
             if version < 5:
                 bkup_path = self.path / "_storage_backup_lt_5"
                 dirs = set(os.listdir(self.path)) - {"storage.lock"}
-                os.mkdir(bkup_path)
+                bkup_path.mkdir()
                 for directory in dirs:
                     shutil.move(self.path / directory, bkup_path / directory)
 
@@ -714,6 +715,7 @@ class LocalStorage(BaseMode):
                     36: to37,
                     37: to38,
                     38: to39,
+                    39: to40,
                 }
                 for from_version in range(version, _LOCAL_STORAGE_VERSION):
                     migrations[from_version].migrate(self.path)
@@ -822,7 +824,7 @@ class LocalStorage(BaseMode):
             f.write(data)
             f.flush()
             Path(f.name).chmod(0o660)
-            os.rename(f.name, filename)
+            Path(f.name).rename(filename)
 
     def _to_netcdf_transaction(
         self, filename: str | os.PathLike[str], dataset: xr.Dataset
@@ -837,7 +839,7 @@ class LocalStorage(BaseMode):
         with NamedTemporaryFile(dir=self._swap_path, delete=False) as f:
             dataset.to_netcdf(f, engine="scipy")
             Path(f.name).chmod(0o660)
-            os.rename(f.name, filename)
+            Path(f.name).rename(filename)
 
     def _to_parquet_transaction(
         self, filename: str | os.PathLike[str], dataframe: pl.DataFrame
@@ -852,7 +854,7 @@ class LocalStorage(BaseMode):
         with NamedTemporaryFile(dir=self._swap_path, delete=False) as f:
             dataframe.write_parquet(f.name)
             Path(f.name).chmod(0o660)
-            os.rename(f.name, filename)
+            Path(f.name).rename(filename)
 
 
 def _storage_version(path: Path) -> int:

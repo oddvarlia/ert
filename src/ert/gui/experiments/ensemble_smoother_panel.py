@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtCore import pyqtSlot as Slot
 from PyQt6.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QWidget
 
+from ert.config.parameter_config import has_updatable_parameters
 from ert.gui.ertnotifier import ErtNotifier
 from ert.gui.ertwidgets import (
     ActiveRealizationsModel,
@@ -46,7 +47,7 @@ class EnsembleSmootherPanel(ExperimentConfigPanel):
         self,
         analysis_config: AnalysisConfig,
         parameter_configuration: list[ParameterConfig],
-        run_path: str,
+        runpath: str,
         notifier: ErtNotifier,
         active_realizations: list[bool],
         config_num_realization: int,
@@ -71,7 +72,7 @@ class EnsembleSmootherPanel(ExperimentConfigPanel):
         self._experiment_name_field.setObjectName("experiment_field")
         layout.addRow("Experiment name:", self._experiment_name_field)
 
-        runpath_label = CopyableLabel(text=run_path)
+        runpath_label = CopyableLabel(text=runpath)
         layout.addRow("Runpath:", runpath_label)
 
         number_of_realizations_container = QWidget()
@@ -95,14 +96,15 @@ class EnsembleSmootherPanel(ExperimentConfigPanel):
         layout.addRow("Ensemble format:", self._ensemble_format_field)
 
         self._analysis_module_edit = AnalysisModuleEdit(
-            analysis_config.es_settings,
-            sum(
+            es_settings=analysis_config.es_settings,
+            parameter_config=parameter_configuration,
+            ensemble_size=sum(
                 active_realizations
             ),  # only use active realizations for setting threshold
         )
         self._analysis_module_edit.setObjectName("ensemble_smoother_edit")
-        layout.addRow("Analysis module:", self._analysis_module_edit)
 
+        layout.addRow("Update settings:", self._analysis_module_edit)
         self._active_realizations_field = StringBox(
             ActiveRealizationsModel(len(active_realizations)),  # type: ignore
             "config/experiment/active_realizations",
@@ -115,8 +117,8 @@ class EnsembleSmootherPanel(ExperimentConfigPanel):
         )
         layout.addRow("Active realizations", self._active_realizations_field)
 
+        self._parameter_configuration = parameter_configuration
         design_matrix = analysis_config.design_matrix
-        merged_parameters = parameter_configuration
         if design_matrix is not None:
             layout.addRow(
                 "Design matrix",
@@ -126,13 +128,16 @@ class EnsembleSmootherPanel(ExperimentConfigPanel):
                     config_num_realization,
                 ),
             )
-            merged_parameters = design_matrix.merge_with_existing_parameters(
-                merged_parameters
+            self._parameter_configuration = (
+                design_matrix.merge_with_existing_parameters(
+                    self._parameter_configuration
+                )
             )
 
-        if merged_parameters:
-            layout.addRow("Parameters", get_parameters_button(merged_parameters, self))
-
+        if self._parameter_configuration:
+            layout.addRow(
+                "Parameters", get_parameters_button(self._parameter_configuration, self)
+            )
         self.setLayout(layout)
 
         self._experiment_name_field.getValidationSupport().validationChanged.connect(
@@ -164,6 +169,7 @@ class EnsembleSmootherPanel(ExperimentConfigPanel):
             self._experiment_name_field.isValid()
             and self._ensemble_format_field.isValid()
             and self._active_realizations_field.isValid()
+            and has_updatable_parameters(self._parameter_configuration)
         )
 
     @override

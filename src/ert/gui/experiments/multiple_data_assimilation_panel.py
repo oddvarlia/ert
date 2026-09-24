@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ert.config import ErrorInfo, ParameterConfig
+from ert.config.parameter_config import has_updatable_parameters
 from ert.gui.ertnotifier import ErtNotifier
 from ert.gui.ertwidgets import (
     ActiveRealizationsModel,
@@ -53,6 +54,8 @@ if TYPE_CHECKING:
 
     from ert.config import AnalysisConfig
     from ert.storage import Ensemble
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +67,7 @@ class Arguments:
     weights: str
     prior_ensemble_id: str | None  # UUID not serializable in json
     experiment_name: str
+    parameter_configuration: list[ParameterConfig]
 
 
 class MultipleDataAssimilationPanel(ExperimentConfigPanel):
@@ -71,12 +75,13 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
         self,
         analysis_config: AnalysisConfig,
         parameter_configuration: list[ParameterConfig],
-        run_path: str,
+        runpath: str,
         notifier: ErtNotifier,
         active_realizations: list[bool],
         config_num_realization: int,
     ) -> None:
         super().__init__(MultipleDataAssimilation)
+
         self.notifier = notifier
         self._configured_weights = analysis_config.es_settings.weights
         self._weights_source = self._configured_weights
@@ -98,7 +103,7 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
         self._experiment_name_field.setObjectName("experiment_field")
         layout.addRow("Experiment name:", self._experiment_name_field)
 
-        runpath_label = CopyableLabel(text=run_path)
+        runpath_label = CopyableLabel(text=runpath)
         layout.addRow("Runpath:", runpath_label)
 
         number_of_realizations_container = QWidget()
@@ -128,12 +133,14 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
         self._createInputForWeights(layout)
 
         self._analysis_module_edit = AnalysisModuleEdit(
-            analysis_config.es_settings,
-            sum(
+            es_settings=analysis_config.es_settings,
+            parameter_config=parameter_configuration,
+            ensemble_size=sum(
                 active_realizations
             ),  # only use active realizations for setting threshold
         )
-        layout.addRow("Analysis module:", self._analysis_module_edit)
+        layout.addRow("Update settings:", self._analysis_module_edit)
+
         self._active_realizations_field = StringBox(
             ActiveRealizationsModel(len(active_realizations)),  # type: ignore
             "config/experiment/active_realizations",
@@ -153,7 +160,7 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
             ensembles: Iterable[Ensemble],
         ) -> Iterable[Ensemble]:
             """
-            Only non-leafs of ES-MDA experiment are eligible for restart.
+            Only non-leafs of ES-MDA experiments are eligible as prior ensembles.
             Easiest way to get those is to compare ensemble iteration with total
             number of ES-MDA iterations found via relative weights list length.
             """
@@ -168,7 +175,7 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
             ensembles: Iterable[Ensemble],
         ) -> Iterable[Ensemble]:
             """Ensemble experiment type, which consists just from one iteration,
-            is always eligible for MDA "restart". Used to spare some computing
+            is always eligible as an MDA prior ensemble. Used to spare some computing
             time if users decide to run ES-MDA based on Ensemble Experiment
             results.
             """
@@ -206,8 +213,15 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
         layout.addRow("Select prior ensemble:", self._select_prior_ensemble_box)
 
         self._ensemble_selector.ensemble_populated.connect(self.select_prior_toggled)
+        self._ensemble_selector.ensemble_populated.connect(
+            self._parameter_configuration_changed
+        )
         self._ensemble_selector.currentIndexChanged.connect(self._realizations_from_fs)
+        self._ensemble_selector.currentIndexChanged.connect(
+            self._parameter_configuration_changed
+        )
         self._ensemble_selector.currentIndexChanged.connect(self.update_experiment_name)
+
         layout.addRow("Run from prior ensemble:", self._ensemble_selector)
 
         self._experiment_name_field.getValidationSupport().validationChanged.connect(
@@ -224,7 +238,6 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
         )
 
         design_matrix = analysis_config.design_matrix
-        merged_parameters = parameter_configuration
         if design_matrix is not None:
             layout.addRow(
                 "Design matrix",
@@ -234,12 +247,17 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
                     config_num_realization,
                 ),
             )
-            merged_parameters = design_matrix.merge_with_existing_parameters(
-                merged_parameters
+
+        self._parameter_configuration = parameter_configuration
+        if design_matrix and not self._prior_ensemble_selected:
+            self._parameter_configuration = (
+                design_matrix.merge_with_existing_parameters(parameter_configuration)
             )
 
-        if merged_parameters:
-            layout.addRow("Parameters", get_parameters_button(merged_parameters, self))
+        if self._parameter_configuration:
+            layout.addRow(
+                "Parameters", get_parameters_button(self._parameter_configuration, self)
+            )
 
         self.setLayout(layout)
 
@@ -255,6 +273,12 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
         self._experiment_name_field.setPlaceholderText(
             self.notifier.storage.get_unique_experiment_name(ES_MDA_MODE)
         )
+
+    def _parameter_configuration_changed(self) -> None:
+        if self._ensemble_selector.selected_ensemble is not None:
+            self._analysis_module_edit.parameter_config = list(
+                self._ensemble_selector.selected_ensemble.experiment.parameter_configuration.values()
+            )
 
     @Slot()
     def update_experiment_name(self) -> None:
@@ -324,6 +348,9 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
             self._active_realizations_field.model.setValueFromMask(  # type: ignore
                 self._initial_active_realizations
             )
+
+        # If prior selected, running might become valid
+        self.experiment_configuration_changed.emit()
 
     def _createInputForWeights(self, layout: QFormLayout) -> None:
         relative_iteration_weights_model = ValueModel(self.weights)
@@ -412,7 +439,36 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
             and self._active_realizations_field.isValid()
             and self._relative_iteration_weights_box.isValid()
             and self.weights_valid
+            and self._selected_param_configuration_is_valid
         )
+
+    @property
+    def _selected_param_configuration_is_valid(self) -> bool:
+        if not self._selected_prior_ensemble:
+            return has_updatable_parameters(self._parameter_configuration)
+
+        prior_param_config = list(
+            self._selected_prior_ensemble.experiment.parameter_configuration.values()
+        )
+
+        if prior_param_config is None:
+            return False
+
+        return has_updatable_parameters(prior_param_config)
+
+    @property
+    def _selected_prior_ensemble(self) -> Ensemble | None:
+        if not self._select_prior_ensemble_box.isChecked():
+            return None
+        return self._ensemble_selector.selected_ensemble
+
+    def _get_prior_ensemble_id(self) -> str | None:
+        prior_ensemble = self._selected_prior_ensemble
+        return str(prior_ensemble.id) if prior_ensemble is not None else None
+
+    @property
+    def _prior_ensemble_selected(self) -> bool:
+        return self._selected_prior_ensemble is not None
 
     @override
     def get_experiment_arguments(self) -> Arguments:
@@ -421,13 +477,9 @@ class MultipleDataAssimilationPanel(ExperimentConfigPanel):
             target_ensemble=self._target_ensemble_format_model.getValue(),  # type: ignore
             realizations=self._active_realizations_field.text(),
             weights=self.weights,
-            prior_ensemble_id=(
-                str(self._ensemble_selector.selected_ensemble.id)
-                if self._ensemble_selector.selected_ensemble is not None
-                and self._select_prior_ensemble_box.isChecked()
-                else None
-            ),
+            prior_ensemble_id=self._get_prior_ensemble_id(),
             experiment_name=self._experiment_name_field.get_text,
+            parameter_configuration=self._analysis_module_edit.parameter_config,
         )
 
     def setWeights(self, weights: Any) -> None:

@@ -1,6 +1,5 @@
 import contextlib
 import fileinput
-import os
 import shutil
 import stat
 from collections.abc import Iterator
@@ -33,8 +32,9 @@ from ert.gui.tools.manage_experiments import ManageExperimentsPanel
 from ert.gui.tools.manage_experiments.storage_widget import AddWidget, StorageWidget
 from ert.plugins import get_site_plugins
 from ert.run_models import EnsembleExperiment, MultipleDataAssimilation
+from ert.services import SharedClient
 from ert.storage import Storage
-from tests.ert.handle_run_path_dialog import handle_run_path_dialog
+from tests.ert.handle_runpath_dialog import handle_runpath_dialog
 
 DEFAULT_NUM_REALIZATIONS = 10
 ENSEMBLE_NAME = "iter"
@@ -45,6 +45,14 @@ def setup_svg_search_path():
     QDir.addSearchPath(
         "img", str(files("ert.gui").joinpath("../../ert/gui/resources/gui/img"))
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_ert_api_client():
+    # The client is process-wide and bound to one project, but each test has its own.
+    SharedClient.close_client()
+    yield
+    SharedClient.close_client()
 
 
 @contextmanager
@@ -162,7 +170,8 @@ def _ensemble_experiment_run(
     ):
         mp.chdir(path)
         if failing_reals:
-            Path("poly_eval.py").write_text(
+            poly_py = Path("poly_eval.py")
+            poly_py.write_text(
                 dedent(
                     """\
                         #!/usr/bin/env python3
@@ -190,11 +199,8 @@ def _ensemble_experiment_run(
                 encoding="utf-8",
             )
 
-            Path("poly_eval.py").chmod(
-                os.stat("poly_eval.py").st_mode
-                | stat.S_IXUSR
-                | stat.S_IXGRP
-                | stat.S_IXOTH
+            poly_py.chmod(
+                poly_py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
             )
         run_experiment(EnsembleExperiment, gui)
 
@@ -309,7 +315,7 @@ def run_experiment_fixture(request):
         def handle_dialog():
             QTimer.singleShot(
                 500,
-                lambda: handle_run_path_dialog(gui, qtbot, delete_run_path=False),
+                lambda: handle_runpath_dialog(gui, qtbot, delete_runpath=False),
             )
 
         if experiment_mode.name() not in {
